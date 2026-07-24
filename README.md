@@ -5,9 +5,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Nimannns/mindweavecli/stargazers"><img src="https://img.shields.io/github/stars/Nimannns/mindweavecli?style=flat-square&color=00FF66" alt="Stars"></a>
-  <a href="https://github.com/Nimannns/mindweavecli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
-  <a href="https://x.com/mindweavecli"><img src="https://img.shields.io/badge/X-@mindweavecli-black?style=flat-square&logo=x" alt="X/Twitter"></a>
+  <a href="https://x.com/mindweavecli">X (Twitter)</a> &nbsp;•&nbsp; 
+  <a href="https://github.com/Nimannns/mindweavecli/blob/main/LICENSE">MIT License</a> &nbsp;•&nbsp; 
+  <a href="https://github.com/Nimannns/mindweavecli/stargazers">Stars</a>
 </p>
 
 ---
@@ -17,6 +17,7 @@
 MindWeave is a terminal tool built to orchestrate AI agents directly inside your repository. Most AI coding assistants treat files as isolated prompts or burn through API tokens by dumping raw context everywhere. 
 
 MindWeave approaches codebases differently:
+
 * **Model-Adaptive Prompting:** Dynamic drivers adjust context structure on the fly depending on the underlying backend model's specific strengths.
 * **Smart Repo Caching:** Local state tracking and context caching cut down unnecessary token overhead and reduce response latency.
 * **Terminal Native:** Designed from scratch to live in standard developer environments, running autonomous agent loops without leaving your shell.
@@ -45,4 +46,4 @@ Star the repo to track updates as the initial codebase drops.
 
 * **Feature Ideas:** Submit suggestions via [Issues](https://github.com/Nimannns/mindweavecli/issues).
 * **Contributing:** Read the [Contributing Guide](CONTRIBUTING.md) to set up your dev environment.
-* **Updates:** Follow project progress on [X/Twitter](https://x.com/mindweavecli).
+* **Updates:** Follow project progress on [X (Twitter)](https://x.com/mindweavecli).
