@@ -1,24 +1,69 @@
-# Contributing to MindWeave CLI
+# Contributing to MindWeave
 
-First off, thank you for considering contributing to MindWeave! It's open-source projects like this that make the developer community such a great place to build.
+First off, thank you for considering contributing to MindWeave!
 
-## How Can I Contribute?
+MindWeave is built to be a fast, modular, terminal-native workspace for AI agents. Our core philosophy is to keep the orchestration engine vendor-neutral, while allowing specialized driver modules to deliver peak performance for every model provider.
+
+Whether you're fixing a typo, adding a feature, or optimizing model performance under heavy context loads, your help makes this tool better for everyone.
+
+---
+
+## Project Goals & Architecture
+
+* Terminal-First Experience: Blazing fast execution with zero unnecessary UI bloat.
+* Modular Provider Drivers: Clean isolation between the core agent orchestrator and individual LLM API implementations (/drivers).
+* Empirical Optimization: Tailoring prompt formats, tool-calling loops, and context caching per provider rather than using generic wrappers.
+
+---
+
+## Call for Model Specialists & Domain Engineers
+
+Are you working extensively with a specific model backend (e.g., DeepSeek, Qwen, Claude, OpenAI, Ollama, Groq, or OpenRouter)? Have you benchmarked context windows, fine-tuned prompt drivers, or solved tool-execution edge cases in production?
+
+We are actively inviting engineers to step up as Driver Leads for specific model providers:
+
+### What does a Driver Lead do?
+* Direct Ownership: Get listed under CODEOWNERS for your designated provider directory (/drivers/<provider>).
+* Architectural Influence: Shape how MindWeave handles prompt formatting, system instructions, token caching, and rate limiting for that specific model.
+* Direct Feedback Loop: Help ensure your favorite API or local model delivers the absolute best user experience in a terminal environment.
+
+If you have hands-on experience optimizing for a specific backend, open an issue or drop a comment in Discussions to claim or improve a driver!
+
+---
+
+## How to Contribute
 
 ### 1. Reporting Bugs
-Before creating a bug report, please check the [Issues tab](https://github.com/Nimannns/mindweavecli/issues) to see if the problem has already been reported. If not, open a new issue using our **Bug Report** template.
+Before opening an issue, check the existing issues to avoid duplicates. When filing a bug report, please include:
+* Your operating system and terminal environment.
+* The model provider/driver you were using.
+* Clear steps to reproduce the issue (along with sanitized logs, if applicable).
 
-### 2. Suggesting Enhancements
-Have an idea to make MindWeave better? We'd love to hear it! Submit a **Feature Request** through the Issues tab.
+### 2. Proposing Features or Architectural Changes
+* For minor tweaks or bug fixes: Feel free to submit a Pull Request directly.
+* For major feature additions or core orchestrator changes: Please start a thread in GitHub Discussions first so we can align on the approach.
 
-### 3. Pull Requests (Code Contributions)
-1. **Fork** the repository and create your branch from `main`.
-2. **Name your branch** descriptively:
-   - Features: `feature/short-description`
-   - Bug fixes: `fix/short-description`
-3. Make sure your code is clean and tested.
-4. Submit a **Pull Request** targeting the `main` branch with a clear description of your changes.
+### 3. Pull Request (PR) Process
+1. Fork the repository and create your branch from main:
+   git checkout -b feature/your-feature-name
+2. Write clean, documented code adhering to the existing codebase structure.
+3. Test your changes locally to ensure no regressions.
+4. Submit your PR against the main branch with a clear description of the changes made and why.
 
-## Code of Conduct
-Be respectful, constructive, and collaborative!
+---
 
-Thank you for helping us build the future of AI dev tools! 🚀
+## Development Rules & Integrity
+
+* Respect License Limits: All contributions are licensed under the Apache License 2.0. Ensure any code you submit is your own or properly compatible.
+* No Proprietary Leaks: Share empirical findings, behavioral optimizations, and performance improvements—never proprietary code or sensitive internal data.
+* Anonymity Supported: If contributing on behalf of personal research or under a secondary handle, your contributions will be reviewed purely on code quality and technical merit.
+
+---
+
+## Community & Questions
+
+Got questions or want to discuss agent orchestration before writing code?
+* Drop into our GitHub Discussions.
+* Check out active GitHub Issues marked good first issue or help wanted.
+
+Thank you for helping us build an open, high-performance terminal workspace for everyone!
