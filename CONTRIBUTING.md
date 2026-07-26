@@ -18,7 +18,7 @@ Whether you're fixing a typo, adding a feature, or optimizing model performance 
 
 ## Call for Model Specialists & Domain Engineers
 
-Are you working extensively with a specific model backend (e.g., DeepSeek, Qwen, Claude, OpenAI, Ollama, Groq, or OpenRouter)? Have you benchmarked context windows, fine-tuned prompt drivers, or solved tool-execution edge cases in production?
+Are you working extensively with a specific model backend (e.g., DeepSeek, Qwen, Claude, OpenAI, Ollama, Grok, MiniMax, OpenRouter or any other open weight model)? Have you benchmarked context windows, fine-tuned prompt drivers, or solved tool-execution edge cases in production?
 
 We are actively inviting engineers to step up as Driver Leads for specific model providers:
 
