@@ -1,49 +1,96 @@
-<h1 align="center">MindWeave CLI</h1>
+<h1 align="center">MindWeave</h1>
 
 <p align="center">
-  Model-adaptive, terminal-native AI coding agent.
+  A fast, model-adaptive, terminal-native AI coding agent. You bring your own key; it does the work.
 </p>
 
 <p align="center">
-  <a href="https://x.com/mindweavecli">X (Twitter)</a> &nbsp;•&nbsp; 
-  <a href="https://github.com/Nimannns/mindweavecli/blob/main/LICENSE">MIT License</a> &nbsp;•&nbsp; 
-  <a href="https://github.com/Nimannns/mindweavecli/stargazers">Stars</a>
+  <a href="https://github.com/Nimannns/Mindweave/blob/main/LICENSE">Apache 2.0</a> &nbsp;•&nbsp;
+  <a href="https://github.com/Nimannns/Mindweave/stargazers">Stars</a> &nbsp;•&nbsp;
+  <a href="https://x.com/mindweavecli">X (Twitter)</a>
 </p>
 
 ---
 
 ## What is MindWeave?
 
-MindWeave is a terminal tool built to orchestrate AI agents directly inside your repository. Most AI coding assistants treat files as isolated prompts or burn through API tokens by dumping raw context everywhere. 
+MindWeave is a coding agent that lives in your terminal and works directly inside your repository — reading, searching, editing, running commands, and verifying its own work. It runs **entirely on your machine**: your code and your API key never touch a MindWeave server.
 
-MindWeave approaches codebases differently:
+It's built lean on purpose. Instead of burning your context budget on heavy scaffolding, MindWeave keeps prompts thin and leaves the model room to actually reason about your code.
 
-* **Model-Adaptive Prompting:** Dynamic drivers adjust context structure on the fly depending on the underlying backend model's specific strengths.
-* **Smart Repo Caching:** Local state tracking and context caching cut down unnecessary token overhead and reduce response latency.
-* **Terminal Native:** Designed from scratch to live in standard developer environments, running autonomous agent loops without leaving your shell.
+## Features
 
----
+- **Fully local & BYOK.** Bring your own model API key. No backend, no telemetry, no lock-in.
+- **Model-adaptive drivers.** Each model family gets its own driver so it runs at its best — without bloating the core. Only the driver you're using is ever loaded.
+- **Deterministic code intelligence.** A background lane indexes your repo with tree-sitter and language servers (no tokens, no cost) so the agent understands your codebase, not just the open file.
+- **Real tools.** File read/edit, multi-file edits, ripgrep search, shell with background jobs, sub-agents, and diagnostics — with read-before-edit safety and an undo net.
+- **Session memory.** Long sessions stay sharp: automatic compaction plus a continuously-maintained state summary that survives it.
+- **Per-project governor.** Give a project standing rules, reusable skills, and forbidden paths/commands that the agent must respect.
+- **Interaction modes.** Lightning (auto), Architect (plan-only, read-only), cycled with `shift-tab`.
 
-## Status
+## Requirements
 
-MindWeave is currently in active pre-release development. The core architecture is being refined ahead of the initial public `v0.1` release. 
+- **Node.js 20+**
+- A model API key (see below)
+- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) for faster search — MindWeave falls back to a built-in walker if it's not installed.
 
-Star the repo to track updates as the initial codebase drops.
+> **Platforms:** MindWeave is developed and tested primarily on **Windows**. It's built on cross-platform Node and should run on macOS and Linux — if you hit a platform issue there, please open an issue.
 
----
+## Install
+
+MindWeave installs from source:
+
+```bash
+git clone https://github.com/Nimannns/Mindweave
+cd Mindweave
+npm install
+npm run build
+npm link          # makes the `mindweave` command available globally
+```
+
+## Quick start
+
+```bash
+cd your-project
+mindweave
+```
+
+On first launch, MindWeave asks for your API key and saves it to `~/.mindweave/.env` so it works in every project. Then just type what you want done.
+
+### Your key
+
+MindWeave is **bring-your-own-key**. The first supported model is **DeepSeek**:
+
+```
+DEEPSEEK_API_KEY=your-key-here
+```
+
+Set it during the first-run prompt, in `~/.mindweave/.env`, or as an environment variable.
+
+## Choosing a model
+
+- `/model` — pick which model answers.
+- `/think` — pick how hard it reasons.
+
+Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/drivers/PROVIDERS.md) for the current model list, and [`src/drivers/README.md`](src/drivers/README.md) if you want to build a driver for another model.
 
 ## Roadmap
 
-- [x] Multi-agent orchestration core
-- [x] Community setup & documentation
-- [ ] Terminal execution loop & UI
-- [ ] Model drivers (OpenAI, Anthropic, local backends)
-- [ ] Public v0.1 release
+- [x] Terminal agent loop + streaming UI
+- [x] File / shell / search tools, sub-agents, background jobs
+- [x] Session memory + compaction
+- [x] Deterministic code intelligence (tree-sitter + language servers)
+- [x] Per-project governor (rules / skills / forbidden)
+- [x] DeepSeek driver
+- [x] **v1.0 — first public release**
+- [ ] More model drivers (Anthropic, OpenAI, Qwen, Ollama, …) — community-built
+- [ ] External tool-server support
+- [ ] Verified macOS / Linux support
 
----
+## Contributing
 
-## Get Involved
+MindWeave is open source and contributions are welcome — especially **model drivers**. See the [Contributing Guide](CONTRIBUTING.md), and open an issue or a Discussion to claim a provider.
 
-* **Feature Ideas:** Submit suggestions via [Issues](https://github.com/Nimannns/mindweavecli/issues).
-* **Contributing:** Read the [Contributing Guide](CONTRIBUTING.md) to set up your dev environment.
-* **Updates:** Follow project progress on [X (Twitter)](https://x.com/mindweavecli).
+## License
+
+[Apache License 2.0](LICENSE).

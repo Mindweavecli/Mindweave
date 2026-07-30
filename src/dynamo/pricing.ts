@@ -1,0 +1,137 @@
+/**
+ * pricing.ts — turn raw token usage into what a task actually means and costs.
+ *
+ * The status meter used to sum every model call's `total_tokens`. In an agent loop
+ * each step re-sends the whole growing conversation, so that sum counts the same
+ * (mostly cached) context once per step — which is why every multi-step task looked
+ * like ~700K tokens regardless of its real size or cost. This module computes the
+ * numbers that actually mean something instead:
+ *   - ctx     — the size of the LAST call's prompt = how full the context window is.
+ *   - cost    — cache-aware USD, since cached input is ~1/10 the price of fresh input.
+ *   - cache % — how much of the input was served from the provider's prompt cache.
+ *
+ * Pure (no I/O beyond reading an env override) so it is trivially unit-tested. The
+ * price table is provider-agnostic: add a model, add a row. Prices are estimates a
+ * user can override, so the figure is honest about being approximate.
+ */
+import type { Usage } from "./deepseek.js";
+
+/** USD per 1,000,000 tokens, split by how each token was billed. */
+export interface ModelPrice {
+  /** Input tokens served from the prompt cache (cheap — this is why re-send is OK). */
+  cacheHit: number;
+  /** Fresh input tokens (the real cost of new context). */
+  cacheMiss: number;
+  /** Generated tokens. */
+  output: number;
+}
+
+// DeepSeek list prices (USD / 1M). Cache hits are ~1/10 of misses — the whole
+// reason re-sent context stays cheap. `-pro` is estimated higher; correct it if
+// needed. These are best-effort defaults: override any of them with the env var
+// MINDWEAVE_PRICE="hit,miss,out" (applies to all models) without a rebuild.
+const PRICES: Record<string, ModelPrice> = {
+  "deepseek-v4-flash": { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 },
+  "deepseek-v4-pro": { cacheHit: 0.028, cacheMiss: 0.28, output: 0.56 },
+};
+const DEFAULT_PRICE: ModelPrice = { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 };
+
+/** The price for a model id, honoring a MINDWEAVE_PRICE env override, else the table. */
+export function priceFor(modelId?: string): ModelPrice {
+  const override = parseEnvPrice(process.env.MINDWEAVE_PRICE);
+  if (override) return override;
+  return (modelId && PRICES[modelId]) || DEFAULT_PRICE;
+}
+
+/** Parse `MINDWEAVE_PRICE="hit,miss,out"` into a ModelPrice, or null if unset/invalid. */
+function parseEnvPrice(raw: string | undefined): ModelPrice | null {
+  if (!raw) return null;
+  const parts = raw.split(",").map((s) => Number(s.trim()));
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  return { cacheHit: parts[0]!, cacheMiss: parts[1]!, output: parts[2]! };
+}
+
+/** What a finished task amounts to, derived from each call's reported usage. */
+export interface TaskUsage {
+  /** Total tokens the task actually used (sum of every call's total) — the real
+   *  throughput the provider reports/bills. */
+  totalTokens: number;
+  /** Current context-window occupancy = the last call's prompt size. NOT a sum. */
+  ctxTokens: number;
+  /** Input served from cache, summed across the task's calls. */
+  cacheHitTokens: number;
+  /** Fresh input, summed. */
+  cacheMissTokens: number;
+  /** Generated tokens, summed. */
+  outputTokens: number;
+  /** Share of input (0–100) that came from cache. */
+  cachePct: number;
+  /** Estimated, cache-aware cost in USD (computed but not shown for now). */
+  costUsd: number;
+}
+
+/**
+ * Fold a task's per-call usage samples into the meaningful summary above. `ctx` is
+ * the LAST sample's prompt (the live window size), while hit/miss/output are summed
+ * because those are the tokens actually billed. If a provider doesn't report the
+ * cache split (hit and miss both 0 but a prompt exists), the whole prompt is treated
+ * as a cache miss — a safe over-estimate, never an under-estimate. Returns null when
+ * there's nothing to summarize.
+ */
+export function summarizeTask(samples: Usage[], modelId?: string): TaskUsage | null {
+  if (samples.length === 0) return null;
+  const price = priceFor(modelId);
+  let hit = 0;
+  let miss = 0;
+  let out = 0;
+  let total = 0;
+  for (const s of samples) {
+    let h = s.cacheHitTokens;
+    let m = s.cacheMissTokens;
+    if (h + m === 0 && s.promptTokens > 0) m = s.promptTokens; // no split reported → count as fresh
+    hit += h;
+    miss += m;
+    out += s.completionTokens;
+    total += s.totalTokens;
+  }
+  const ctxTokens = samples[samples.length - 1]!.promptTokens;
+  const totalIn = hit + miss;
+  const cachePct = totalIn > 0 ? Math.round((hit / totalIn) * 100) : 0;
+  const costUsd = (hit * price.cacheHit + miss * price.cacheMiss + out * price.output) / 1_000_000;
+  return { totalTokens: total, ctxTokens, cacheHitTokens: hit, cacheMissTokens: miss, outputTokens: out, cachePct, costUsd };
+}
+
+/** Optional per-task ceilings. 0 disables a limit. */
+export interface TaskLimits {
+  maxUsd: number;
+  maxSeconds: number;
+}
+
+/**
+ * A short reason string if a task has hit its cost or time ceiling, else null.
+ * Pure — the engine reads env into `limits` and passes the running usage + elapsed
+ * time. A 0 limit is disabled. Cost is checked before time so the message names the
+ * more actionable cause first.
+ */
+export function taskLimitReason(usage: TaskUsage | null, elapsedMs: number, limits: TaskLimits): string | null {
+  if (limits.maxUsd > 0 && usage && usage.costUsd >= limits.maxUsd) {
+    return `cost ceiling of ${formatCost(limits.maxUsd)} for one task (about ${formatCost(usage.costUsd)} spent)`;
+  }
+  if (limits.maxSeconds > 0 && elapsedMs / 1000 >= limits.maxSeconds) {
+    return `time ceiling of ${limits.maxSeconds}s for one task`;
+  }
+  return null;
+}
+
+/** A compact token count: 8123 → "8.1K", 56000 → "56K", 540 → "540". */
+export function formatTokens(n: number): string {
+  if (n >= 10_000) return `${Math.round(n / 1000)}K`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
+}
+
+/** An estimated-cost string: "<$0.001" for tiny, "~$0.018" under a dollar, "~$1.42" above. */
+export function formatCost(usd: number): string {
+  if (usd > 0 && usd < 0.001) return "<$0.001";
+  return `~$${usd < 1 ? usd.toFixed(3) : usd.toFixed(2)}`;
+}

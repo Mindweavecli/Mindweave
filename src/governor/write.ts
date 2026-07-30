@@ -1,0 +1,151 @@
+/**
+ * write.ts — persist a new rule or forbidden path for a project.
+ *
+ * The governor owns the on-disk formats, so the act of "make this a rule" or
+ * "forbid this" lives here; the tools in src/tools are thin wrappers that call
+ * these and then mirror the change into the live session so it takes effect
+ * immediately. Files land under the project's state dir (the same per-project
+ * folder sessions use), so they persist for every future launch in this project.
+ */
+import { promises as fs } from "node:fs";
+import { join } from "node:path";
+import { projectDir } from "../memory/store.js";
+import { parseForbidden, parseForbiddenCommands } from "./forbidden.js";
+import type { Rule, SkillMeta } from "./types.js";
+
+/** A filesystem-safe slug from a human name/phrase (kebab, ≤50 chars). */
+function slugify(text: string): string {
+  return (
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 50) || "rule"
+  );
+}
+
+/** A short name derived from a rule's text (first few words) when none is given. */
+export function deriveRuleName(body: string): string {
+  return slugify(body.split(/\s+/).slice(0, 6).join(" "));
+}
+
+/**
+ * Save a standing rule as `rules/<slug>.md` in the project's state dir and return
+ * it. Overwrites a rule file of the same slug (re-stating a rule updates it). Pass
+ * `globs` to SCOPE the rule (fires only when the work touches matching files);
+ * omit them for an always-on rule (the default).
+ */
+export async function writeRule(
+  cwd: string,
+  name: string,
+  body: string,
+  description = "",
+  globs: string[] = [],
+): Promise<Rule> {
+  const dir = join(projectDir(cwd), "rules");
+  await fs.mkdir(dir, { recursive: true });
+  const file = join(dir, `${slugify(name)}.md`);
+  const header =
+    `---\nname: ${name}\n` +
+    (description ? `description: ${description}\n` : "") +
+    (globs.length > 0 ? `globs: ${globs.join(", ")}\n` : "") +
+    `---\n`;
+  await fs.writeFile(file, `${header}${body}\n`, "utf8");
+  return { name, description, body, ...(globs.length > 0 ? { globs } : {}) };
+}
+
+/** Fields for creating a skill (everything but where it lives). */
+export interface NewSkill {
+  name: string;
+  description: string;
+  body: string;
+  whenToUse?: string;
+  argumentHint?: string;
+  globs?: string[];
+}
+
+/**
+ * Create (or overwrite) a skill at `skills/<slug>/SKILL.md` in the project's
+ * state dir and return its catalog metadata. The directory name is the skill's
+ * invocation name; the frontmatter carries description / when-to-use / hint /
+ * scope so it loads back identically.
+ */
+export async function writeSkill(cwd: string, skill: NewSkill): Promise<SkillMeta> {
+  const name = slugify(skill.name);
+  const dir = join(projectDir(cwd), "skills", name);
+  await fs.mkdir(dir, { recursive: true });
+
+  const header =
+    `---\nname: ${name}\n` +
+    (skill.description ? `description: ${skill.description}\n` : "") +
+    (skill.whenToUse ? `when_to_use: ${skill.whenToUse}\n` : "") +
+    (skill.argumentHint ? `argument-hint: ${skill.argumentHint}\n` : "") +
+    (skill.globs && skill.globs.length > 0 ? `globs: ${skill.globs.join(", ")}\n` : "") +
+    `---\n`;
+  await fs.writeFile(join(dir, "SKILL.md"), `${header}${skill.body}\n`, "utf8");
+
+  return {
+    name,
+    description: skill.description,
+    whenToUse: skill.whenToUse ?? "",
+    dir,
+    ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+    ...(skill.globs && skill.globs.length > 0 ? { globs: skill.globs } : {}),
+  };
+}
+
+/**
+ * Append a pattern to `forbidden.md` in the project's state dir. Idempotent —
+ * returns `{ added: false }` if it was already forbidden. The pattern is
+ * normalized the same way the loader normalizes (drop leading `./`, trailing `/`).
+ */
+export async function appendForbidden(
+  cwd: string,
+  pattern: string,
+): Promise<{ added: boolean; pattern: string }> {
+  const normalized = pattern.trim().replace(/^\.?\//, "").replace(/\/+$/, "");
+  if (!normalized) return { added: false, pattern: normalized };
+
+  const base = projectDir(cwd);
+  const file = join(base, "forbidden.md");
+  let text = "";
+  try {
+    text = await fs.readFile(file, "utf8");
+  } catch {
+    /* no forbidden.md yet */
+  }
+  if (parseForbidden(text).includes(normalized)) return { added: false, pattern: normalized };
+
+  await fs.mkdir(base, { recursive: true });
+  const separator = text && !text.endsWith("\n") ? "\n" : "";
+  await fs.writeFile(file, `${text}${separator}${normalized}\n`, "utf8");
+  return { added: true, pattern: normalized };
+}
+
+/**
+ * Append a command pattern to `forbidden-commands.md` in the project's state dir.
+ * Idempotent — `{ added: false }` if it was already forbidden. Sibling of
+ * appendForbidden; command patterns are kept verbatim (trimmed), not path-normalized.
+ */
+export async function appendForbiddenCommand(
+  cwd: string,
+  pattern: string,
+): Promise<{ added: boolean; pattern: string }> {
+  const normalized = pattern.trim();
+  if (!normalized) return { added: false, pattern: normalized };
+
+  const base = projectDir(cwd);
+  const file = join(base, "forbidden-commands.md");
+  let text = "";
+  try {
+    text = await fs.readFile(file, "utf8");
+  } catch {
+    /* no forbidden-commands.md yet */
+  }
+  if (parseForbiddenCommands(text).includes(normalized)) return { added: false, pattern: normalized };
+
+  await fs.mkdir(base, { recursive: true });
+  const separator = text && !text.endsWith("\n") ? "\n" : "";
+  await fs.writeFile(file, `${text}${separator}${normalized}\n`, "utf8");
+  return { added: true, pattern: normalized };
+}

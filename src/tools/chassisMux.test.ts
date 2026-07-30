@@ -1,0 +1,92 @@
+/**
+ * chassisMux.test.ts — code maps across multiple roots: route path queries to the
+ * owning root, merge name queries, and rank relevance across roots.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { join } from "node:path";
+import { allChassis, chassisForPath, mergedDefinition, mergedRelevant } from "./chassisMux.js";
+import { asFileId, makeSymbolId, type Chassis, type RankedSymbol, type SymbolNode } from "../alternator/chassis/types.js";
+import { CodeGraph } from "../alternator/chassis/graph.js";
+import type { ToolContext } from "./types.js";
+
+function sym(file: string, name: string, line: number): SymbolNode {
+  const f = asFileId(file);
+  return { id: makeSymbolId(f, name, line), name, kind: "function", file: f, line };
+}
+
+function fakeChassis(defs: Record<string, SymbolNode[]>, ranked: RankedSymbol[]): Chassis {
+  return {
+    outline: async () => [],
+    definition: async (name) => ({ symbols: defs[name] ?? [], confidence: "name-level" }),
+    references: async () => ({ refs: [], confidence: "name-level" }),
+    relevant: async (_focus, limit = 25) => ranked.slice(0, limit),
+    span: async () => [],
+    directorySummary: async () => null,
+    diagnostics: async () => [],
+    status: () => ({ ready: true, files: 1, symbols: 1, resolvedLanguages: [] }),
+  };
+}
+
+/** A chassis backed by a real CodeGraph it exposes via graphRef (drives cross-root
+ *  ranking, the same path CodeChassis takes). */
+function fakeWithGraph(graph: CodeGraph): Chassis {
+  return { ...fakeChassis({}, []), graphRef: () => graph } as Chassis & { graphRef: () => CodeGraph };
+}
+
+const ROOT_A = process.platform === "win32" ? "C:\\a" : "/a";
+const ROOT_B = process.platform === "win32" ? "C:\\b" : "/b";
+
+function ctxTwo(a: Chassis, b: Chassis): ToolContext {
+  return {
+    cwd: ROOT_A,
+    roots: [ROOT_A, ROOT_B],
+    reads: new Map(),
+    todos: [],
+    chassis: a,
+    chassisByRoot: new Map([
+      [ROOT_A, a],
+      [ROOT_B, b],
+    ]),
+  };
+}
+
+test("allChassis lists every root's map; chassisForPath routes by owner", () => {
+  const a = fakeChassis({}, []);
+  const b = fakeChassis({}, []);
+  const ctx = ctxTwo(a, b);
+  assert.equal(allChassis(ctx).length, 2);
+  assert.equal(chassisForPath(ctx, join(ROOT_A, "src", "x.ts")), a);
+  assert.equal(chassisForPath(ctx, join(ROOT_B, "y.ts")), b);
+});
+
+test("mergedDefinition unions hits from both roots", async () => {
+  const a = fakeChassis({ foo: [sym(join(ROOT_A, "x.ts"), "foo", 1)] }, []);
+  const b = fakeChassis({ foo: [sym(join(ROOT_B, "y.ts"), "foo", 9)] }, []);
+  const { symbols } = await mergedDefinition(ctxTwo(a, b), "foo");
+  assert.equal(symbols.length, 2);
+});
+
+test("mergedRelevant merges by score and caps to the limit (no graphs)", async () => {
+  const a = fakeChassis({}, [{ symbol: sym(join(ROOT_A, "x.ts"), "lo", 1), score: 1 }]);
+  const b = fakeChassis({}, [{ symbol: sym(join(ROOT_B, "y.ts"), "hi", 1), score: 5 }]);
+  const ranked = await mergedRelevant(ctxTwo(a, b), [], 1);
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0]!.symbol.name, "hi"); // highest score wins across roots
+});
+
+test("cross-root linking: a backend symbol referenced from the frontend ranks top", async () => {
+  // Backend defines Hub (and a leaf); the frontend references Hub from two files.
+  const back = new CodeGraph();
+  back.addSymbol(sym(join(ROOT_A, "models.ts"), "Hub", 1));
+  back.addSymbol(sym(join(ROOT_A, "util.ts"), "Leaf", 1));
+  const front = new CodeGraph();
+  front.addSymbol(sym(join(ROOT_B, "a.ts"), "feA", 1));
+  front.addSymbol(sym(join(ROOT_B, "b.ts"), "feB", 1));
+  front.addRef("Hub", { file: asFileId(join(ROOT_B, "a.ts")), line: 2, confidence: "name-level" });
+  front.addRef("Hub", { file: asFileId(join(ROOT_B, "b.ts")), line: 2, confidence: "name-level" });
+
+  const ranked = await mergedRelevant(ctxTwo(fakeWithGraph(back), fakeWithGraph(front)), [], 10);
+  // Centrality flowed across roots: the cross-root hub outranks every leaf.
+  assert.equal(ranked[0]!.symbol.name, "Hub");
+});

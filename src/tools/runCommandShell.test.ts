@@ -1,0 +1,129 @@
+/**
+ * runCommandShell.test.ts — the Windows cmd shell option of run_command: a command
+ * runs, its exit code is surfaced (and marks isError), and `cd` persists via the
+ * temp-.bat wrapper. Skipped off Windows (the cmd path is Windows-only).
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runCommand } from "./runCommand.js";
+import { BackgroundShells } from "./backgroundShells.js";
+import type { ToolContext } from "./types.js";
+
+const IS_WINDOWS = process.platform === "win32";
+const ctx = (cwd: string): ToolContext => ({ cwd, reads: new Map(), todos: [] }) as unknown as ToolContext;
+
+test("run_command shell:cmd runs a command and returns its output", { skip: !IS_WINDOWS }, async () => {
+  const r = await runCommand.execute({ command: "echo hello-from-cmd", shell: "cmd" }, ctx(process.cwd()));
+  assert.match(r.output, /hello-from-cmd/);
+  assert.ok(!r.isError, "a successful cmd command is not an error");
+});
+
+test("run_command shell:cmd surfaces a non-zero exit and flags isError", { skip: !IS_WINDOWS }, async () => {
+  const r = await runCommand.execute({ command: "cmd /c exit 7", shell: "cmd" }, ctx(process.cwd()));
+  assert.match(r.output, /exited with code 7/);
+  assert.equal(r.isError, true, "a failing check must be an error so the verify gate stays unsatisfied");
+});
+
+test("run_command shell:cmd persists the working directory (cd carries over)", { skip: !IS_WINDOWS }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mindweave-cmdcwd-"));
+  const c = ctx(process.cwd());
+  await runCommand.execute({ command: `cd /d "${dir}"`, shell: "cmd" }, c);
+  // fs.realpath differences (8.3 / casing) aside, the tail should match the new dir.
+  assert.ok(c.cwd.toLowerCase().includes("mindweave-cmdcwd-"), `cwd should have moved into the temp dir, got ${c.cwd}`);
+});
+
+test("run_command defaults to powershell and still works", { skip: !IS_WINDOWS }, async () => {
+  const r = await runCommand.execute({ command: "Write-Output ps-default" }, ctx(process.cwd()));
+  assert.match(r.output, /ps-default/);
+  assert.ok(!r.isError);
+});
+
+test("run_command blocks a PowerShell && parse error BEFORE running it", { skip: !IS_WINDOWS }, async () => {
+  const r = await runCommand.execute({ command: "echo one && echo two" }, ctx(process.cwd()));
+  assert.equal(r.isError, true);
+  assert.match(r.output, /won't run|parse error/i);
+  assert.match(r.output, /shell:'cmd'/); // points at the escape hatch
+  assert.doesNotMatch(r.output, /\btwo\b/, "must not have executed — this is a pre-flight block");
+});
+
+test("run_command shell:cmd allows && chaining (no pre-flight block)", { skip: !IS_WINDOWS }, async () => {
+  const r = await runCommand.execute({ command: "echo one && echo two", shell: "cmd" }, ctx(process.cwd()));
+  assert.ok(!r.isError);
+  assert.match(r.output, /one/);
+  assert.match(r.output, /two/);
+});
+
+test("run_command is INTERRUPTIBLE — aborting kills a running command fast", { skip: !IS_WINDOWS }, async () => {
+  const controller = new AbortController();
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [], abortSignal: controller.signal } as unknown as ToolContext;
+  const started = Date.now();
+  // ~9s command; abort after 150ms and it must settle almost immediately, not hang or
+  // run to completion (the "stuck agent on a hung command" bug).
+  const p = runCommand.execute({ command: "ping -n 10 127.0.0.1 >nul", shell: "cmd" }, c);
+  setTimeout(() => controller.abort(), 150);
+  const r = await p;
+  const elapsed = Date.now() - started;
+  assert.equal(r.isError, true, "an interrupted command is an error");
+  assert.match(r.output, /interrupt/i);
+  assert.ok(elapsed < 5000, `should settle right after abort, not run the full command (took ${elapsed}ms)`);
+});
+
+test("run_command settles immediately if the signal is already aborted", { skip: !IS_WINDOWS }, async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [], abortSignal: controller.signal } as unknown as ToolContext;
+  const r = await runCommand.execute({ command: "ping -n 10 127.0.0.1 >nul", shell: "cmd" }, c);
+  assert.equal(r.isError, true);
+  assert.match(r.output, /interrupt/i);
+});
+
+// ── the safety nets that must catch a hung command (the installer bug) ────────────
+
+test("soft-timeout MOVES a long command to the background and returns (no hang)", { skip: !IS_WINDOWS, timeout: 12000 }, async () => {
+  const mgr = new BackgroundShells();
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const started = Date.now();
+  // 30s sleep, 1s soft timeout → must background and RETURN in ~1s, not run 30s.
+  const r = await runCommand.execute({ command: "Start-Sleep -Seconds 30", timeout: 1000 }, c);
+  const elapsed = Date.now() - started;
+  mgr.dispose();
+  assert.match(r.output, /background as shell #\d+/i, `expected a backgrounded result, got: ${r.output.slice(0, 120)}`);
+  assert.ok(elapsed < 6000, `should return at the ~1s timeout, not run the full command (took ${elapsed}ms)`);
+});
+
+test("run_in_background returns a shell id immediately", { skip: !IS_WINDOWS, timeout: 12000 }, async () => {
+  const mgr = new BackgroundShells();
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const r = await runCommand.execute({ command: "Start-Sleep -Seconds 30", run_in_background: true }, c);
+  mgr.dispose();
+  assert.match(r.output, /background as shell #\d+/i);
+});
+
+test("with NO background manager, the soft-timeout kills the command and still resolves", { skip: !IS_WINDOWS, timeout: 12000 }, async () => {
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [] } as unknown as ToolContext; // no backgroundShells
+  const started = Date.now();
+  const r = await runCommand.execute({ command: "Start-Sleep -Seconds 30", timeout: 1000 }, c);
+  const elapsed = Date.now() - started;
+  assert.equal(r.isError, true);
+  assert.match(r.output, /timed out/i);
+  assert.ok(elapsed < 6000, `should resolve at the timeout, not hang (took ${elapsed}ms)`);
+});
+
+test("the ACTUAL bug shape: `Start-Process -Wait` on a detached process still backgrounds (no freeze)", { skip: !IS_WINDOWS, timeout: 15000 }, async () => {
+  const mgr = new BackgroundShells();
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const started = Date.now();
+  // powershell blocks on a detached child (like the VS installer) — the exact shape
+  // that froze the agent. Soft timeout must still move it to the background.
+  const r = await runCommand.execute(
+    { command: "Start-Process -Wait -FilePath cmd.exe -ArgumentList '/c','ping -n 60 127.0.0.1 >nul'", timeout: 1500 },
+    c,
+  );
+  const elapsed = Date.now() - started;
+  mgr.dispose();
+  assert.match(r.output, /background as shell #\d+/i, `expected backgrounded, got: ${r.output.slice(0, 120)}`);
+  assert.ok(elapsed < 8000, `must not freeze on Start-Process -Wait (took ${elapsed}ms)`);
+});

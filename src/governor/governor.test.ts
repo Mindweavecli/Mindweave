@@ -1,0 +1,184 @@
+/**
+ * governor.test.ts — the per-project control layer (deterministic, no network).
+ *
+ * Exercises the three pieces directly against a temp project state dir: rule
+ * loading/rendering, skill catalog + body (progressive disclosure), and the
+ * forbidden matchers (the pure path/command checks the mutating tools rely on).
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { parseFrontmatter } from "./frontmatter.js";
+import { loadRules, renderRules, parseGlobs } from "./rules.js";
+import { loadSkillCatalog, loadSkillBody, findSkill, renderSkillCatalog, activeSkills, substituteSkillArgs } from "./skills.js";
+import { parseForbidden, forbiddenPathReason, forbiddenCommandReason, parseForbiddenCommands, forbiddenCommandPatternReason } from "./forbidden.js";
+
+async function tempDir(): Promise<string> {
+  return await fs.mkdtemp(join(tmpdir(), "mindweave-gov-"));
+}
+
+test("parseFrontmatter reads key/value header and trims body", () => {
+  const { data, body } = parseFrontmatter("---\nname: foo\ndescription: a bar\n---\nHello\nworld\n");
+  assert.equal(data.name, "foo");
+  assert.equal(data.description, "a bar");
+  assert.equal(body, "Hello\nworld");
+});
+
+test("parseFrontmatter with no header returns whole text as body", () => {
+  const { data, body } = parseFrontmatter("just a body, no header");
+  assert.deepEqual(data, {});
+  assert.equal(body, "just a body, no header");
+});
+
+test("loadRules reads each rules/*.md and renders bodies; skips empties", async () => {
+  const dir = await tempDir();
+  await fs.mkdir(join(dir, "rules"), { recursive: true });
+  await fs.writeFile(join(dir, "rules", "a.md"), "---\nname: pnpm\ndescription: pkg mgr\n---\nUse pnpm, never npm.");
+  await fs.writeFile(join(dir, "rules", "b.md"), "---\nname: empty\n---\n"); // no body → skipped
+
+  const rules = await loadRules(dir);
+  assert.equal(rules.length, 1);
+  assert.equal(rules[0].name, "pnpm");
+  assert.equal(rules[0].body, "Use pnpm, never npm.");
+  assert.equal(renderRules(rules), "- Use pnpm, never npm.");
+  assert.equal(renderRules([]), "");
+});
+
+test("loadRules returns [] when there is no rules dir", async () => {
+  const dir = await tempDir();
+  assert.deepEqual(await loadRules(dir), []);
+});
+
+test("parseGlobs splits comma/space and normalizes leading ./ and trailing /", () => {
+  assert.deepEqual(parseGlobs("src/api/**, ./src/routes/ test/**"), ["src/api/**", "src/routes", "test/**"]);
+  assert.deepEqual(parseGlobs(undefined), []);
+});
+
+test("glob-scoped rules fire only when the working set matches; always-on always fire", async () => {
+  const dir = await tempDir();
+  await fs.mkdir(join(dir, "rules"), { recursive: true });
+  await fs.writeFile(join(dir, "rules", "global.md"), "---\nname: pm\n---\nUse pnpm.");
+  await fs.writeFile(join(dir, "rules", "api.md"), "---\nname: api\nglobs: src/api/**\n---\nAPI routes are kebab-case.");
+  const rules = await loadRules(dir);
+  assert.equal(rules.find((r) => r.name === "api")?.globs?.[0], "src/api/**");
+
+  // No working set → only the always-on rule.
+  assert.equal(renderRules(rules, []), "- Use pnpm.");
+  // Working set touches src/api → both rules fire.
+  const both = renderRules(rules, ["src/api/users.ts"]);
+  assert.match(both, /Use pnpm\./);
+  assert.match(both, /kebab-case/);
+  // Working set elsewhere → scoped rule stays out.
+  assert.equal(renderRules(rules, ["src/web/app.ts"]), "- Use pnpm.");
+});
+
+test("skills: catalog is metadata only; body loads on demand", async () => {
+  const dir = await tempDir();
+  const skillDir = join(dir, "skills", "ship");
+  await fs.mkdir(skillDir, { recursive: true });
+  await fs.writeFile(
+    join(skillDir, "SKILL.md"),
+    "---\nname: ship\ndescription: release flow\nwhen_to_use: cutting a release\n---\n1. bump\n2. tag\n3. publish",
+  );
+  // A directory without SKILL.md is ignored.
+  await fs.mkdir(join(dir, "skills", "notaskill"), { recursive: true });
+
+  const catalog = await loadSkillCatalog(dir);
+  assert.equal(catalog.length, 1);
+  assert.equal(catalog[0].name, "ship");
+  assert.equal(catalog[0].whenToUse, "cutting a release");
+  assert.match(renderSkillCatalog(catalog), /ship: release flow — use when: cutting a release/);
+
+  const found = findSkill(catalog, "/ship");
+  assert.ok(found);
+  const body = await loadSkillBody(found);
+  assert.match(body ?? "", /1\. bump/);
+});
+
+test("skills: argument-hint + globs parse; catalog scopes by working set", async () => {
+  const dir = await tempDir();
+  const mk = async (name: string, fm: string) => {
+    const d = join(dir, "skills", name);
+    await fs.mkdir(d, { recursive: true });
+    await fs.writeFile(join(d, "SKILL.md"), `---\n${fm}\n---\nbody`);
+  };
+  await mk("deploy", "name: deploy\ndescription: ship it\nargument-hint: <env>");
+  await mk("apitest", "name: apitest\ndescription: api tests\nglobs: src/api/**");
+
+  const catalog = await loadSkillCatalog(dir);
+  const deploy = catalog.find((s) => s.name === "deploy");
+  assert.equal(deploy?.argumentHint, "<env>");
+  const apitest = catalog.find((s) => s.name === "apitest");
+  assert.deepEqual(apitest?.globs, ["src/api/**"]);
+
+  // Always-listed shows the hint; scoped one only when the working set matches.
+  assert.match(renderSkillCatalog(catalog, []), /deploy <env>: ship it/);
+  assert.equal(activeSkills(catalog, []).some((s) => s.name === "apitest"), false);
+  assert.equal(activeSkills(catalog, ["src/api/x.ts"]).some((s) => s.name === "apitest"), true);
+});
+
+test("substituteSkillArgs fills $ARGUMENTS / $1, else appends as context", () => {
+  assert.equal(substituteSkillArgs("Deploy to $1 now.", "staging"), "Deploy to staging now.");
+  assert.equal(substituteSkillArgs("Args: $ARGUMENTS.", "a b c"), "Args: a b c.");
+  assert.match(substituteSkillArgs("No placeholders here.", "extra"), /Additional context from the user: extra/);
+  assert.equal(substituteSkillArgs("Plain body.", ""), "Plain body.");
+});
+
+test("forbidden: parse strips comments/blanks and leading ./ and trailing /", () => {
+  const patterns = parseForbidden("# secrets\nsrc/legacy/\n\n./config/prod.json\n*.pem\n");
+  assert.deepEqual(patterns, ["src/legacy", "config/prod.json", "*.pem"]);
+});
+
+test("forbidden: path matching covers dirs, files, globs, and ignores outside-root", () => {
+  const root = process.platform === "win32" ? "C:\\proj" : "/proj";
+  const cfg = { patterns: ["src/legacy", "config/prod.json", "*.pem"], root };
+  const abs = (p: string) => join(root, p);
+
+  // Folder prefix: the dir itself and anything under it.
+  assert.equal(forbiddenPathReason(cfg, abs("src/legacy")), "src/legacy");
+  assert.equal(forbiddenPathReason(cfg, abs("src/legacy/old.ts")), "src/legacy");
+  // Exact file.
+  assert.equal(forbiddenPathReason(cfg, abs("config/prod.json")), "config/prod.json");
+  // Glob in the root.
+  assert.equal(forbiddenPathReason(cfg, abs("key.pem")), "*.pem");
+  // Allowed paths.
+  assert.equal(forbiddenPathReason(cfg, abs("src/app.ts")), null);
+  assert.equal(forbiddenPathReason(cfg, abs("config/dev.json")), null);
+  // Outside the project root is never matched by relative patterns.
+  assert.equal(forbiddenPathReason(cfg, join(root, "..", "other", "src", "legacy")), null);
+  // No config → always allowed.
+  assert.equal(forbiddenPathReason(undefined, abs("src/legacy")), null);
+});
+
+test("forbidden: command matching refuses when a forbidden path appears", () => {
+  const cfg = { patterns: ["src/legacy", "deploy.sh", "*.pem"], root: "/proj" };
+  assert.equal(forbiddenCommandReason(cfg, "cat src/legacy/old.ts"), "src/legacy");
+  assert.equal(forbiddenCommandReason(cfg, "bash deploy.sh --prod"), "deploy.sh");
+  assert.equal(forbiddenCommandReason(cfg, "npm run build"), null);
+  // A pure glob has no literal to locate in free-form command text.
+  assert.equal(forbiddenCommandReason(cfg, "ls *.pem"), null);
+});
+
+test("forbidden-commands: parse keeps lines verbatim, drops comments/blanks", () => {
+  assert.deepEqual(
+    parseForbiddenCommands("# no servers\ntauri dev\n\n  git push  \n"),
+    ["tauri dev", "git push"],
+  );
+});
+
+test("forbidden-commands: pattern matches as a normalized case-insensitive substring", () => {
+  const cfg = { patterns: [], commands: ["tauri dev", "git push"], root: "/proj" };
+  // Blocks the command itself and any command that contains it (npm run tauri dev).
+  assert.equal(forbiddenCommandPatternReason(cfg, "npm run tauri dev"), "tauri dev");
+  assert.equal(forbiddenCommandPatternReason(cfg, "TAURI   DEV"), "tauri dev"); // case + whitespace
+  assert.equal(forbiddenCommandPatternReason(cfg, "git push --force origin main"), "git push");
+  // Unrelated commands pass; a build is not a dev server.
+  assert.equal(forbiddenCommandPatternReason(cfg, "npm run tauri build"), null);
+  assert.equal(forbiddenCommandPatternReason(cfg, "git status"), null);
+  // No commands configured (or none at all) → always allowed.
+  assert.equal(forbiddenCommandPatternReason({ patterns: [], root: "/proj" }, "tauri dev"), null);
+  assert.equal(forbiddenCommandPatternReason(undefined, "tauri dev"), null);
+});

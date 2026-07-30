@@ -1,0 +1,127 @@
+/**
+ * forbidden.ts — the user's per-project deny-list, enforced mechanically.
+ *
+ * This is the strong half of "forbidden": besides being told in the prompt, the
+ * mutating tools call these pure checks before acting, so a forbidden file
+ * literally cannot be edited/overwritten and a command that names a forbidden
+ * path is refused. It's the user-defined sibling of guard.ts's built-in
+ * protected-paths list — same shape (reason string or null), same fail-open rule
+ * (anything not matched is allowed).
+ *
+ * Format of `forbidden.md` (one pattern per line; `#` comments and blanks
+ * ignored): gitignore-style globs relative to the project root —
+ *   src/legacy/**        # a folder and everything under it
+ *   config/prod.json     # a single file
+ *   *.pem                # a glob
+ * A leading `/` or `./` is tolerated and treated as project-relative.
+ */
+import { isAbsolute, relative, resolve } from "node:path";
+import { globToRegExp, literalPrefix } from "./glob.js";
+import type { ForbiddenConfig } from "./types.js";
+
+/** Parse the raw text of a forbidden.md into a clean pattern list. */
+export function parseForbidden(text: string): string[] {
+  const patterns: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    // Normalize a leading `/` or `./` to a plain project-relative pattern.
+    const cleaned = trimmed.replace(/^\.?\//, "").replace(/\/+$/, "");
+    if (cleaned) patterns.push(cleaned);
+  }
+  return patterns;
+}
+
+/** Parse the raw text of a forbidden-commands.md into a clean pattern list. Unlike
+ *  path patterns these are command fragments, so there is NO path normalization —
+ *  a line is kept verbatim (trimmed), minus `#` comments and blanks. */
+export function parseForbiddenCommands(text: string): string[] {
+  const patterns: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    patterns.push(trimmed);
+  }
+  return patterns;
+}
+
+/**
+ * If `command` matches a forbidden command pattern, return the pattern (for the
+ * message); otherwise null. Match is case-insensitive on whitespace-collapsed text,
+ * so `tauri dev` blocks `npm run tauri  dev` alike. Deterministic and strict by
+ * design — the model cannot run a forbidden command; only the user can lift it.
+ */
+export function forbiddenCommandPatternReason(
+  cfg: ForbiddenConfig | undefined,
+  command: string,
+): string | null {
+  const commands = cfg?.commands;
+  if (!commands || commands.length === 0) return null;
+  const norm = command.toLowerCase().replace(/\s+/g, " ");
+  for (const raw of commands) {
+    const pat = raw.toLowerCase().replace(/\s+/g, " ").trim();
+    if (pat && norm.includes(pat)) return raw;
+  }
+  return null;
+}
+
+function toPosix(p: string): string {
+  return p.split("\\").join("/");
+}
+
+// Compiled form of one pattern: its regex and its literal prefix.
+interface Compiled {
+  raw: string;
+  re: RegExp;
+  prefix: string;
+}
+
+// Cache compilation per `patterns` array (tiny lists, but checks run per
+// edit/write/command). Keyed on the array identity, which is stable for a session.
+const cache = new WeakMap<string[], Compiled[]>();
+
+function compile(patterns: string[]): Compiled[] {
+  let compiled = cache.get(patterns);
+  if (!compiled) {
+    compiled = patterns.map((raw) => ({ raw, re: globToRegExp(raw), prefix: literalPrefix(raw) }));
+    cache.set(patterns, compiled);
+  }
+  return compiled;
+}
+
+/**
+ * If `absPath` is forbidden, return the pattern that matched (for the message);
+ * otherwise null. Paths outside the project root are never matched by relative
+ * patterns. `cfg` may be undefined (no forbidden list) → always allow.
+ */
+export function forbiddenPathReason(cfg: ForbiddenConfig | undefined, absPath: string): string | null {
+  if (!cfg || cfg.patterns.length === 0) return null;
+  const abs = isAbsolute(absPath) ? absPath : resolve(cfg.root, absPath);
+  const rel = toPosix(relative(cfg.root, abs));
+  if (rel === "" || rel.startsWith("..")) return null; // the root itself / outside it
+
+  for (const { raw, re, prefix } of compile(cfg.patterns)) {
+    if (re.test(rel)) return raw;
+    // A bare folder/file prefix matches the path itself and anything under it,
+    // so `src/legacy` forbids `src/legacy` and `src/legacy/x.ts` alike.
+    if (prefix && (rel === prefix || rel.startsWith(prefix + "/"))) return raw;
+  }
+  return null;
+}
+
+/**
+ * If `command` references a forbidden path, return the pattern that matched;
+ * otherwise null. Best a static check can do for a shell: if a forbidden
+ * pattern's literal portion appears anywhere in the command string, refuse it
+ * (the chosen strict policy — better a false positive the user can adjust than a
+ * silent shell bypass of a forbidden file).
+ */
+export function forbiddenCommandReason(cfg: ForbiddenConfig | undefined, command: string): string | null {
+  if (!cfg || cfg.patterns.length === 0) return null;
+  for (const { raw, prefix } of compile(cfg.patterns)) {
+    // Need a meaningful literal to scan for; a pure-glob pattern like `*.pem`
+    // has prefix "" and can't be located in free-form command text.
+    if (prefix.length >= 2 && command.includes(prefix)) return raw;
+  }
+  return null;
+}

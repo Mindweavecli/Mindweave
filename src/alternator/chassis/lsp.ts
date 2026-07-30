@@ -1,0 +1,389 @@
+/**
+ * lsp.ts — talk to language servers for compiler-accurate answers.
+ *
+ * Used for ON-DEMAND precision, not bulk indexing: when the model asks where a
+ * symbol is defined or who references it, we ask the real language server (the
+ * TypeScript compiler, etc.) via `workspace/symbol` and `textDocument/references`.
+ * The tree-sitter tier still builds the bulk graph (outline + ranking); this just
+ * upgrades specific answers to `resolved`.
+ *
+ * Everything is best-effort: a server that won't launch or is slow is marked dead
+ * and the chassis falls back to the tree-sitter graph. Servers are launched
+ * lazily, shared per spec, and killed on dispose.
+ */
+import { spawn, type ChildProcess } from "node:child_process";
+import { promises as fs } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  createMessageConnection,
+  StreamMessageReader,
+  StreamMessageWriter,
+  type MessageConnection,
+} from "vscode-jsonrpc/node";
+import { languageIdFor, serverFor, specForLanguage, type ServerSpec } from "./servers.js";
+import type { CodeDiagnostic, SymbolKind } from "./types.js";
+import { flattenDocSymbols, pickNearest, type LineSpan, type RawDocSymbol } from "../../tools/spanCore.js";
+
+const INIT_TIMEOUT = 15_000;
+const REQUEST_TIMEOUT = 10_000;
+
+export interface LspSymbol {
+  name: string;
+  kind: SymbolKind;
+  file: string; // absolute
+  line: number; // 1-based
+  character: number; // 0-based (for follow-up references queries)
+}
+export interface LspLocation {
+  file: string;
+  line: number;
+}
+
+interface Session {
+  conn: MessageConnection;
+  proc: ChildProcess;
+  opened: Set<string>;
+}
+
+export class LspManager {
+  private sessions = new Map<string, Promise<Session | null>>();
+  private languages = new Set<string>();
+  private files = new Set<string>();
+  private procs: ChildProcess[] = [];
+  private disposed = false;
+  /** Latest diagnostics per file (forward-slashed path), from publishDiagnostics. */
+  private diagnosticsByFile = new Map<string, RawDiagnostic[]>();
+  /** didChange version counter per file. */
+  private versions = new Map<string, number>();
+
+  constructor(private readonly root: string) {}
+
+  /** Record that the project contains this file (so we know which servers to
+   *  consult, and so we can open the project before a workspace query). */
+  noteFile(absPath: string): void {
+    const lang = languageIdFor(absPath);
+    if (lang) {
+      this.languages.add(lang);
+      this.files.add(absPath);
+    }
+  }
+
+  /** Compiler-accurate symbols matching `name` across the project. */
+  async symbols(name: string): Promise<LspSymbol[]> {
+    const out: LspSymbol[] = [];
+    for (const spec of this.distinctSpecs()) {
+      const session = await this.session(spec);
+      if (!session) continue;
+      // A server like tsserver won't index a project until a file in it is
+      // opened — open the project's files (bounded) before querying navto.
+      await this.ensureProjectOpen(session, spec);
+      try {
+        const res = (await this.request(session, "workspace/symbol", { query: name })) as
+          | RawSymbol[]
+          | null;
+        for (const s of res ?? []) {
+          if (s.name !== name) continue; // workspace/symbol is fuzzy; keep exact
+          const loc = s.location;
+          if (!loc?.uri) continue;
+          out.push({
+            name: s.name,
+            kind: symbolKind(s.kind),
+            file: uriToPath(loc.uri),
+            line: (loc.range?.start.line ?? 0) + 1,
+            character: loc.range?.start.character ?? 0,
+          });
+        }
+      } catch {
+        // server hiccup — skip; chassis falls back to tree-sitter
+      }
+    }
+    return out;
+  }
+
+  /** Compiler-accurate references to the symbol at a given position. */
+  async references(absPath: string, line1: number, character: number): Promise<LspLocation[]> {
+    const spec = serverFor(absPath);
+    if (!spec) return [];
+    const session = await this.session(spec);
+    if (!session) return [];
+    try {
+      await this.didOpen(session, absPath);
+      const res = (await this.request(session, "textDocument/references", {
+        textDocument: { uri: pathToFileURL(absPath).toString() },
+        position: { line: line1 - 1, character },
+        context: { includeDeclaration: false },
+      })) as RawLocation[] | null;
+      return (res ?? [])
+        .filter((l) => l?.uri)
+        .map((l) => ({ file: uriToPath(l.uri), line: (l.range?.start.line ?? 0) + 1 }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** The full line span (1-based, inclusive) of a symbol named `name` in a file,
+   *  from the server's `textDocument/documentSymbol` — compiler-accurate. `nearLine`
+   *  disambiguates when the name occurs more than once. Null when unavailable. */
+  async symbolRange(absPath: string, name: string, nearLine?: number): Promise<LineSpan | null> {
+    const spec = serverFor(absPath);
+    if (!spec) return null;
+    const session = await this.session(spec);
+    if (!session) return null;
+    try {
+      await this.didOpen(session, absPath);
+      const res = (await this.request(session, "textDocument/documentSymbol", {
+        textDocument: { uri: pathToFileURL(absPath).toString() },
+      })) as RawDocSymbol[] | null;
+      const matches = flattenDocSymbols(res).filter((s) => s.name === name);
+      return pickNearest(
+        matches.map((s) => ({ start: s.start, end: s.end })),
+        nearLine,
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /** Compiler/linter diagnostics for a file. Syncs the current on-disk contents
+   *  to the server first (didChange/didOpen), then waits briefly for the server to
+   *  publish. Empty when no server handles the file. */
+  async diagnostics(absPath: string): Promise<CodeDiagnostic[]> {
+    const spec = serverFor(absPath);
+    if (!spec) return [];
+    const session = await this.session(spec);
+    if (!session) return [];
+
+    let text: string;
+    try {
+      text = await fs.readFile(absPath, "utf8");
+    } catch {
+      return [];
+    }
+    const key = absPath.split("\\").join("/");
+    const uri = pathToFileURL(absPath).toString();
+    // Clear so we can detect a FRESH publish (an empty array is a valid "clean" result).
+    this.diagnosticsByFile.delete(key);
+    try {
+      if (session.opened.has(absPath)) {
+        const version = (this.versions.get(key) ?? 1) + 1;
+        this.versions.set(key, version);
+        session.conn.sendNotification("textDocument/didChange", {
+          textDocument: { uri, version },
+          contentChanges: [{ text }],
+        });
+      } else {
+        await this.didOpen(session, absPath);
+        this.versions.set(key, 1);
+      }
+    } catch {
+      return [];
+    }
+
+    // Wait (bounded) for the server to publish for this file.
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline && !this.diagnosticsByFile.has(key)) {
+      await delay(60);
+    }
+    return (this.diagnosticsByFile.get(key) ?? []).map((d) => toCodeDiagnostic(key, d));
+  }
+
+  /** Kill all language servers. Synchronous so it can run in a process-exit
+   *  handler; tracked child processes are killed directly (no awaiting). */
+  dispose(): void {
+    this.disposed = true;
+    for (const proc of this.procs) {
+      try {
+        proc.kill();
+      } catch {
+        /* already gone */
+      }
+    }
+    this.procs = [];
+    this.sessions.clear();
+  }
+
+  // ── internals ──────────────────────────────────────────────────────────────
+  private distinctSpecs(): ServerSpec[] {
+    const byKey = new Map<string, ServerSpec>();
+    for (const lang of this.languages) {
+      const spec = specForLanguage(lang);
+      if (spec) byKey.set(spec.key, spec);
+    }
+    return [...byKey.values()];
+  }
+
+  private session(spec: ServerSpec): Promise<Session | null> {
+    if (this.disposed) return Promise.resolve(null);
+    let existing = this.sessions.get(spec.key);
+    if (!existing) {
+      existing = this.launch(spec).catch(() => null);
+      this.sessions.set(spec.key, existing);
+    }
+    return existing;
+  }
+
+  private async launch(spec: ServerSpec): Promise<Session | null> {
+    // Windows npm-installed servers are .cmd/.bat shims and can't be spawned
+    // directly (recent Node rejects them) — run those through the shell.
+    const winShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(spec.command);
+    const proc = winShim
+      ? spawn(`"${spec.command}" ${spec.args.join(" ")}`, {
+          cwd: this.root,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+          shell: true,
+        })
+      : spawn(spec.command, spec.args, {
+          cwd: this.root,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        });
+    if (!proc.stdout || !proc.stdin) return null;
+    this.procs.push(proc);
+    const conn = createMessageConnection(
+      new StreamMessageReader(proc.stdout),
+      new StreamMessageWriter(proc.stdin),
+    );
+    conn.onError(() => {});
+    // Language servers push diagnostics as an unsolicited notification; keep the
+    // latest per file so `diagnostics()` can read them after syncing a file.
+    conn.onNotification("textDocument/publishDiagnostics", (params: unknown) => {
+      const p = params as { uri?: string; diagnostics?: RawDiagnostic[] };
+      if (p?.uri) this.diagnosticsByFile.set(uriToPath(p.uri), p.diagnostics ?? []);
+    });
+    conn.listen();
+
+    const rootUri = pathToFileURL(this.root).toString();
+    await withTimeout(
+      conn.sendRequest("initialize", {
+        processId: process.pid,
+        rootUri,
+        capabilities: {},
+        workspaceFolders: [{ uri: rootUri, name: "root" }],
+      }),
+      INIT_TIMEOUT,
+    );
+    conn.sendNotification("initialized", {});
+    return { conn, proc, opened: new Set() };
+  }
+
+  /** Open the noted files this server handles, so the project is loaded/indexed.
+   *  Bounded — one open loads the tsconfig project; we open a few for coverage. */
+  private async ensureProjectOpen(session: Session, spec: ServerSpec): Promise<void> {
+    let opened = 0;
+    for (const path of this.files) {
+      if (opened >= 50) break;
+      if (serverFor(path)?.key !== spec.key || session.opened.has(path)) continue;
+      await this.didOpen(session, path);
+      opened++;
+    }
+  }
+
+  private async didOpen(session: Session, absPath: string): Promise<void> {
+    if (session.opened.has(absPath)) return;
+    const langId = languageIdFor(absPath) ?? "plaintext";
+    let text = "";
+    try {
+      text = await fs.readFile(absPath, "utf8");
+    } catch {
+      return;
+    }
+    session.conn.sendNotification("textDocument/didOpen", {
+      textDocument: { uri: pathToFileURL(absPath).toString(), languageId: langId, version: 1, text },
+    });
+    session.opened.add(absPath);
+  }
+
+  private request(session: Session, method: string, params: unknown): Promise<unknown> {
+    return withTimeout(session.conn.sendRequest(method, params), REQUEST_TIMEOUT);
+  }
+}
+
+interface RawLocation {
+  uri: string;
+  range?: { start: { line: number; character: number } };
+}
+
+interface RawDiagnostic {
+  range?: { start?: { line?: number; character?: number } };
+  severity?: number; // 1=Error 2=Warning 3=Information 4=Hint
+  message?: string;
+  source?: string;
+}
+
+/** Map an LSP diagnostic to our shape (1-based line/col). */
+function toCodeDiagnostic(file: string, d: RawDiagnostic): CodeDiagnostic {
+  const sev = d.severity;
+  const severity = sev === 1 ? "error" : sev === 2 ? "warning" : sev === 3 ? "info" : "hint";
+  return {
+    file,
+    line: (d.range?.start?.line ?? 0) + 1,
+    column: (d.range?.start?.character ?? 0) + 1,
+    severity,
+    message: (d.message ?? "").trim(),
+    ...(d.source ? { source: d.source } : {}),
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+interface RawSymbol {
+  name: string;
+  kind: number;
+  location: RawLocation;
+}
+
+function uriToPath(uri: string): string {
+  try {
+    return fileURLToPath(uri).split("\\").join("/");
+  } catch {
+    return uri;
+  }
+}
+
+// LSP SymbolKind (numeric) → our SymbolKind.
+function symbolKind(k: number): SymbolKind {
+  switch (k) {
+    case 5:
+      return "class";
+    case 6:
+    case 9:
+      return "method";
+    case 8:
+      return "field";
+    case 10:
+      return "enum";
+    case 11:
+      return "interface";
+    case 12:
+      return "function";
+    case 13:
+      return "variable";
+    case 14:
+      return "constant";
+    case 23:
+      return "struct";
+    case 2:
+    case 3:
+      return "module";
+    default:
+      return "other";
+  }
+}
+
+function withTimeout<T>(p: Thenable<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("lsp timeout")), ms);
+    Promise.resolve(p).then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}

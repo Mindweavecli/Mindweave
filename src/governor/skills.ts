@@ -1,0 +1,114 @@
+/**
+ * skills.ts — reusable procedures the model can run on demand.
+ *
+ * A skill is a named playbook: `<project-state>/skills/<name>/SKILL.md`, with a
+ * `name` / `description` / `when_to_use` header and a markdown body of steps.
+ * The key design is **progressive disclosure**: only
+ * the lightweight catalog (name + description + when-to-use) ever sits in the
+ * prompt, so a project can have many skills at near-zero token cost; the full
+ * body is read only when the skill is actually invoked — by the user typing
+ * `/name`, or by the model calling the `use_skill` tool when a description fits.
+ */
+import { promises as fs } from "node:fs";
+import { join } from "node:path";
+import { parseFrontmatter } from "./frontmatter.js";
+import { parseGlobs } from "./rules.js";
+import { anyPathMatches } from "./glob.js";
+import type { SkillMeta } from "./types.js";
+
+const SKILL_FILE = "SKILL.md";
+
+/** Discover the project's skills, reading only each one's frontmatter (catalog). */
+export async function loadSkillCatalog(stateDir: string): Promise<SkillMeta[]> {
+  const dir = join(stateDir, "skills");
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return []; // no skills dir yet
+  }
+
+  const skills: SkillMeta[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue; // skills are directories: <name>/SKILL.md
+    const skillDir = join(dir, entry.name);
+    try {
+      const raw = await fs.readFile(join(skillDir, SKILL_FILE), "utf8");
+      const { data } = parseFrontmatter(raw);
+      const globs = parseGlobs(data.globs || data.paths);
+      skills.push({
+        name: data.name || entry.name,
+        description: data.description || "",
+        whenToUse: data.when_to_use || data.whenToUse || "",
+        dir: skillDir,
+        ...(data["argument-hint"] ? { argumentHint: data["argument-hint"] } : {}),
+        ...(globs.length > 0 ? { globs } : {}),
+      });
+    } catch {
+      // No SKILL.md (or unreadable) — not a skill directory; skip it.
+    }
+  }
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+  return skills;
+}
+
+/** Load a skill's full body (the steps), read fresh on invocation. Null if gone. */
+export async function loadSkillBody(skill: SkillMeta): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(join(skill.dir, SKILL_FILE), "utf8");
+    return parseFrontmatter(raw).body;
+  } catch {
+    return null;
+  }
+}
+
+/** Find a skill by its invocation name (case-insensitive). */
+export function findSkill(skills: SkillMeta[], name: string): SkillMeta | undefined {
+  const wanted = name.trim().toLowerCase().replace(/^\//, "");
+  return skills.find((s) => s.name.toLowerCase() === wanted);
+}
+
+/**
+ * The skills visible in the catalog this turn: every always-listed skill plus any
+ * glob-scoped skill whose patterns match the working set. (Scoped-out skills are
+ * still invokable by name — this only controls catalog noise.)
+ */
+export function activeSkills(skills: SkillMeta[], workingSet: string[] = []): SkillMeta[] {
+  return skills.filter((s) => !s.globs || s.globs.length === 0 || anyPathMatches(workingSet, s.globs));
+}
+
+/**
+ * Render the catalog for the system prompt: one line per visible skill with its
+ * name (+ argument hint), description, and when-to-use. "" when none are visible.
+ * Content only — the engine frames it.
+ */
+export function renderSkillCatalog(skills: SkillMeta[], workingSet: string[] = []): string {
+  const visible = activeSkills(skills, workingSet);
+  if (visible.length === 0) return "";
+  return visible
+    .map((s) => {
+      const hint = s.argumentHint ? ` ${s.argumentHint}` : "";
+      const desc = s.description ? `: ${s.description}` : "";
+      const when = s.whenToUse ? ` — use when: ${s.whenToUse}` : "";
+      return `- ${s.name}${hint}${desc}${when}`;
+    })
+    .join("\n");
+}
+
+/**
+ * Substitute a skill's argument string into its body: `$ARGUMENTS` → the whole
+ * string, `$1`/`$2`/… → positional tokens. If the body has no such placeholder
+ * but arguments were given, they're appended as additional context — so both
+ * parameterized and plain skills handle args sensibly.
+ */
+export function substituteSkillArgs(body: string, argString: string): string {
+  const args = argString.trim();
+  const positional = args.length > 0 ? args.split(/\s+/) : [];
+  const hasPlaceholder = /\$ARGUMENTS\b/.test(body) || /\$\d+/.test(body);
+
+  let out = body.replace(/\$ARGUMENTS\b/g, args);
+  out = out.replace(/\$(\d+)/g, (_, n: string) => positional[Number(n) - 1] ?? "");
+
+  if (!hasPlaceholder && args) out += `\n\nAdditional context from the user: ${args}`;
+  return out;
+}

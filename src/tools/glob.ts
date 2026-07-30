@@ -1,0 +1,102 @@
+/**
+ * glob.ts — find files by name pattern.
+ *
+ * The model's way to discover paths it can then read or edit. Primary engine is
+ * ripgrep (`rg --files -g <pattern>`): fast and .gitignore-aware. When `rg` isn't
+ * installed it falls back to a pure-Node walk filtered by a compiled glob. A simple
+ * shape: `pattern` + optional `path`.
+ */
+import { promises as fs } from "node:fs";
+import { join } from "node:path";
+import type { Tool, ToolContext, ToolResult } from "./types.js";
+import { relativize, searchUnits, type SearchUnit } from "./paths.js";
+import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
+import { ripgrepAvailable, runRipgrep } from "./ripgrep.js";
+
+const MAX_RESULTS = 100;
+
+export const globTool: Tool = {
+  name: "glob",
+  readOnly: true,
+  description:
+    "Find files whose path matches a glob pattern (e.g. `**/*.ts`, `src/**/*.{ts,tsx}`). " +
+    "Returns matching file paths. Searches every session root unless `path` is given.",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    required: ["pattern"],
+    properties: {
+      pattern: {
+        type: "string",
+        description: "The glob pattern to match file paths against.",
+      },
+      path: {
+        type: "string",
+        description:
+          "Directory (or a root's label) to search in. Defaults to all session roots. Omit to use the default.",
+      },
+    },
+  },
+
+  async execute(args, ctx): Promise<ToolResult> {
+    const pattern = typeof args.pattern === "string" ? args.pattern.trim() : "";
+    if (!pattern) return fail("`pattern` is required.");
+
+    const rawPath = typeof args.path === "string" && args.path.trim() ? args.path.trim() : undefined;
+    const units = searchUnits(ctx, rawPath);
+    const haveRg = await ripgrepAvailable();
+
+    const matched: string[] = [];
+    for (const unit of units) {
+      const dir = unit.sub ? join(unit.root, unit.sub) : unit.root;
+      try {
+        const stat = await fs.stat(dir);
+        if (!stat.isDirectory()) {
+          if (rawPath) return fail(`${rawPath} is not a directory.`);
+          continue;
+        }
+      } catch {
+        if (rawPath) return fail(`directory not found: ${rawPath}`);
+        continue; // a missing root in a multi-root sweep is skipped, not fatal
+      }
+      matched.push(...(haveRg ? await globViaRipgrep(pattern, unit, ctx) : await globViaWalk(pattern, unit, ctx)));
+    }
+
+    if (matched.length === 0) {
+      return { output: "No files found.", summary: `glob ${pattern} — no matches` };
+    }
+
+    const truncated = matched.length > MAX_RESULTS;
+    const lines = matched.slice(0, MAX_RESULTS);
+    if (truncated) {
+      lines.push(`… (${matched.length - MAX_RESULTS} more — narrow the pattern)`);
+    }
+    return {
+      output: lines.join("\n"),
+      summary: `glob ${pattern} (${matched.length} match${matched.length === 1 ? "" : "es"})`,
+    };
+  },
+};
+
+/** `rg --files -g` within one root. Emitted root-relative paths are re-labeled so
+ *  they round-trip across roots (single-root: a plain relative path, unchanged). */
+async function globViaRipgrep(pattern: string, unit: SearchUnit, ctx: ToolContext): Promise<string[]> {
+  const args = ["--files", "--hidden", "--path-separator", "/"];
+  for (const dir of DEFAULT_IGNORES) args.push("-g", `!${dir}`);
+  args.push("-g", pattern, "--", unit.sub || ".");
+  const res = await runRipgrep(args, unit.root);
+  if (res.code !== 0 && res.code !== 1) return globViaWalk(pattern, unit, ctx); // fall back on rg failure
+  return res.lines.map((line) => relativize(ctx, join(unit.root, line)));
+}
+
+/** Pure-Node fallback: walk one root and filter by the compiled glob; labeled output. */
+async function globViaWalk(pattern: string, unit: SearchUnit, ctx: ToolContext): Promise<string[]> {
+  const regexp = globToRegExp(pattern);
+  const dir = unit.sub ? join(unit.root, unit.sub) : unit.root;
+  const { files } = await walkFiles(dir, 20_000);
+  return files.filter((f) => regexp.test(f.rel)).map((f) => relativize(ctx, f.abs));
+}
+
+function fail(message: string): ToolResult {
+  return { output: `Error: ${message}`, isError: true, summary: message };
+}
