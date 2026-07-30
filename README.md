@@ -41,7 +41,7 @@ It's built lean on purpose. Instead of burning your context budget on heavy scaf
 MindWeave installs from source:
 
 ```bash
-git clone https://github.com/Nimannns/Mindweave
+git clone https://github.com/Mindweavecli/Mindweave
 cd Mindweave
 npm install
 npm run build
