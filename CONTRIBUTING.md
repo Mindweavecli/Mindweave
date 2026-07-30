@@ -63,7 +63,7 @@ The one rule: **you must fully understand what you're submitting.** Know the pro
 ## Development Rules & Integrity
 
 * Respect License Limits: All contributions are licensed under the Apache License 2.0. Ensure any code you submit is your own or properly compatible.
-* No Proprietary Leaks: Share empirical findings, behavioral optimizations, and performance improvements—never proprietary code or sensitive internal data.
+* No Proprietary Leaks: Share empirical findings, behavioral optimizations, and performance improvements never proprietary code or sensitive internal data.
 * Anonymity Supported: If contributing on behalf of personal research or under a secondary handle, your contributions will be reviewed purely on code quality and technical merit.
 
 ---
