@@ -54,9 +54,9 @@ Before opening an issue, check the existing issues to avoid duplicates. When fil
 
 ## AI-Assisted Contributions
 
-AI-generated and AI-assisted code is welcome — we don't gatekeep how you write.
+AI-generated and AI-assisted code is welcome, we don't gatekeep how you write.
 
-The one rule: **you must fully understand what you're submitting.** Know the problem you're fixing or the feature you're adding, understand why your change works, and be aware of what it affects. Test it before you open the PR. A contribution the author can't explain won't be merged — whether a human or a model wrote it.
+The one rule: **you must fully understand what you're submitting.** Know the problem you're fixing or the feature you're adding, understand why your change works, and be aware of what it affects. Test it before you open the PR. A contribution the author can't explain won't be merged, whether a human or a model wrote it.
 
 ---
 
