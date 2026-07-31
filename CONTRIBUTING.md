@@ -54,16 +54,16 @@ Before opening an issue, check the existing issues to avoid duplicates. When fil
 
 ## AI-Assisted Contributions
 
-AI-generated and AI-assisted code is welcome — we don't gatekeep how you write.
+AI-generated and AI-assisted code is welcome, we don't gatekeep how you write.
 
-The one rule: **you must fully understand what you're submitting.** Know the problem you're fixing or the feature you're adding, understand why your change works, and be aware of what it affects. Test it before you open the PR. A contribution the author can't explain won't be merged — whether a human or a model wrote it.
+The one rule: **you must fully understand what you're submitting.** Know the problem you're fixing or the feature you're adding, understand why your change works, and be aware of what it affects. Test it before you open the PR. A contribution the author can't explain won't be merged, whether a human or a model wrote it.
 
 ---
 
 ## Development Rules & Integrity
 
 * Respect License Limits: All contributions are licensed under the Apache License 2.0. Ensure any code you submit is your own or properly compatible.
-* No Proprietary Leaks: Share empirical findings, behavioral optimizations, and performance improvements—never proprietary code or sensitive internal data.
+* No Proprietary Leaks: Share empirical findings, behavioral optimizations, and performance improvements never proprietary code or sensitive internal data.
 * Anonymity Supported: If contributing on behalf of personal research or under a secondary handle, your contributions will be reviewed purely on code quality and technical merit.
 
 ---
