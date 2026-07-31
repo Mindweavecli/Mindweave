@@ -23,11 +23,11 @@ test("Flash offers 2 reasoning levels, Pro offers 3", () => {
 test("thinkLabel reflects the config", () => {
   assert.equal(thinkLabel({ model: "deepseek-v4-flash", thinking: false, effort: "high" }), "Standard");
   assert.equal(thinkLabel({ model: "deepseek-v4-flash", thinking: true, effort: "high" }), "Reasoning");
-  assert.equal(thinkLabel({ model: "deepseek-v4-pro", thinking: true, effort: "xhigh" }), "Maximum");
+  assert.equal(thinkLabel({ model: "deepseek-v4-pro", thinking: true, effort: "max" }), "Maximum");
 });
 
-test("withModel clamps Pro-Maximum down to Flash-high (Flash has no xhigh)", () => {
-  const proMax = { model: "deepseek-v4-pro", thinking: true, effort: "xhigh" } as const;
+test("withModel clamps Pro-Maximum down to Flash-high (Flash has no maximum tier)", () => {
+  const proMax = { model: "deepseek-v4-pro", thinking: true, effort: "max" } as const;
   const onFlash = withModel(proMax, "deepseek-v4-flash");
   assert.equal(onFlash.model, "deepseek-v4-flash");
   assert.equal(onFlash.thinking, true);
@@ -41,7 +41,7 @@ test("save → load roundtrips the config; missing file falls back to default", 
     const fresh = await loadModelConfig(dir);
     assert.deepEqual(fresh, DEFAULT_MODEL_CONFIG);
 
-    const cfg = { model: "deepseek-v4-pro", thinking: true, effort: "xhigh" } as const;
+    const cfg = { model: "deepseek-v4-pro", thinking: true, effort: "max" } as const;
     await saveModelConfig(dir, cfg);
     assert.deepEqual(await loadModelConfig(dir), cfg);
   } finally {

@@ -12,7 +12,8 @@
  */
 import { promises as fs } from "node:fs";
 import type { Tool, ToolResult } from "./types.js";
-import { protectedPathReason } from "./guard.js";
+import { foreignAgentReason, protectedPathReason } from "./guard.js";
+import { requestAgentDataAccess } from "./approval.js";
 import { relativize, resolvePath, nextTouch, touch } from "./paths.js";
 import { addFocus } from "./focus.js";
 
@@ -79,6 +80,12 @@ export const readFile: Tool = {
     const blocked = protectedPathReason(filePath);
     if (blocked) {
       return fail(`Refusing to read ${rawPath}: it is ${blocked}.`);
+    }
+    // Another tool's data: ask the user rather than helping ourselves to it.
+    const otherTool = foreignAgentReason(filePath);
+    if (otherTool) {
+      const denied = await requestAgentDataAccess(ctx, otherTool, `Reading ${rawPath}`);
+      if (denied) return denied;
     }
     const offset = toPositiveInt(args.offset);
     const limit = toPositiveInt(args.limit);

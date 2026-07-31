@@ -111,6 +111,7 @@ function makeSession(cwd: string, id: string, transcript: Entry[]): Session {
     projectMemory: "",
     memoryDir: "",
     memoryIndex: "",
+    priorSessions: 0,
     projectContext: "",
     governance: { rules: [], skills: [], forbidden: { patterns: [], root: cwd } },
     modelConfig: { model: "deepseek-v4-flash", thinking: false, effort: "high" },

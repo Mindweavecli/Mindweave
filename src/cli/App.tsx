@@ -11,7 +11,7 @@
  *
  * The UI owns the session for the whole conversation: it creates one on startup,
  * appends each user turn to its transcript, asks the dynamo (engine) for a reply,
- * and persists after every turn. It still knows nothing about DeepSeek, prompts,
+ * and persists after every turn. It still knows nothing about any provider, prompts,
  * or compaction internals — it calls `respond()` / `compactNow()` and renders the
  * stream events they emit.
  */
@@ -118,7 +118,8 @@ export function App() {
   // calls; we keep each call's REAL usage and fold it into a meaningful summary
   // (context size + cache-aware cost), not a raw sum of re-sent context — that sum
   // counted the cached prefix once per step and made every task look like ~700K.
-  // Nothing is shown while working (no number is accurate mid-stream on DeepSeek).
+  // Nothing is shown while working: mid-stream counts aren't reliable, and a
+  // provider may not report usage until the turn ends.
   const usageSamples = useRef<Usage[]>([]);
   // Aborts the in-flight turn when the user presses Esc (created fresh per turn).
   const abortRef = useRef<AbortController | null>(null);
@@ -311,7 +312,7 @@ export function App() {
   // on the welcome screen. We save it to ~/.mindweave/.env (so it persists for every
   // future launch, in every project) and start chatting right away — no restart,
   // never asked again. The key lives only on this machine; it's sent only to the
-  // user's own DeepSeek requests, never to us.
+  // user's own requests to their chosen provider, never to us.
   function handleKeySubmit(value: string) {
     const key = value.trim();
     if (!key) return;
@@ -1090,7 +1091,7 @@ export function App() {
       );
     }
     if (overlay.kind === "think") {
-      const model = cur?.modelConfig.model ?? "deepseek-v4-flash";
+      const model = cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model;
       const levels = thinkLevels(model);
       const curLabel = cur ? thinkLabel(cur.modelConfig) : "";
       const items = levels.map((l) => ({ label: l.label + (l.label === curLabel ? "  ✓" : ""), description: l.description }));
@@ -1221,7 +1222,7 @@ function useTerminalWidth(): number {
 // The built-in slash commands offered by the input's autocomplete. Project skills
 // are appended at render time from the live session.
 const BASE_COMMANDS = [
-  { name: "/model", description: "choose the model (DeepSeek V4 Flash / Pro)" },
+  { name: "/model", description: "choose which model answers" },
   { name: "/think", description: "set the reasoning level for the model" },
   { name: "/rules", description: "list rules, or add one: /rules <directive>" },
   { name: "/skills", description: "list skills, or make one: /skills <description>" },
@@ -1284,7 +1285,7 @@ function StatusLine({
   startedAt: number | null;
   lastMs: number | null;
   /** The task's summary, known only once the turn ends. Null while working — no
-   *  number is accurate mid-stream on DeepSeek. */
+   *  number is reliable mid-stream. */
   usage: TaskUsage | null;
 }) {
   // A once-a-second tick, only while busy, so the elapsed timer advances. No

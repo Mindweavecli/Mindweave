@@ -29,19 +29,34 @@ export const MODELS: ModelChoice[] = [
 ];
 
 /**
+ * The effort values DeepSeek's API actually accepts for `reasoning_effort`.
+ *
+ * The shared `Effort` type is the union of every provider's ladder and includes
+ * rungs DeepSeek has never had (`medium`, `xhigh` — those are Anthropic's). Sending
+ * one is not a soft failure: it's a value the API does not recognize. So this set
+ * is the authority, `normalize` clamps to it, and a test asserts every level we
+ * advertise survives that clamp.
+ */
+const ACCEPTED_EFFORTS = new Set<Effort>(["low", "high", "max"]);
+
+/**
  * The reasoning levels offered by `/think`, which depend on the chosen model.
  * DeepSeek V4 exposes thinking as a toggle on the same model id plus a
  * `reasoning_effort` budget, so the whole space is:
  *
  *   Flash → Standard (no thinking) · Reasoning (thinking, high effort)
  *   Pro   → Standard · High (thinking, high) · Maximum (thinking, max effort)
+ *
+ * Pro's Maximum sends `max`. It previously sent `xhigh`, which DeepSeek does not
+ * accept, so that level had never done anything — the rung had leaked in from the
+ * shared type when a second provider was added.
  */
 export function thinkLevels(model: ModelId): ThinkLevel[] {
   if (model === PRO) {
     return [
       { label: "Standard", description: "answer directly", thinking: false, effort: "high" },
       { label: "High", description: "deeper step-by-step reasoning", thinking: true, effort: "high" },
-      { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "xhigh" },
+      { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "max" },
     ];
   }
   return [
@@ -76,15 +91,18 @@ export function contextWindow(_model: ModelId): number {
 
 /**
  * Coerce a stored or unknown config onto a model this driver actually serves, and
- * keep the reasoning intent valid. DeepSeek offers only two of the five shared
- * effort rungs, so anything else clamps to `high`; and Flash has no `xhigh` budget
- * at all, so a Maximum-on-Pro choice steps down when moving to Flash.
+ * keep the reasoning intent valid. DeepSeek accepts three of the five shared
+ * effort rungs (`low`, `high`, `max`), so anything else clamps to `high`; and only
+ * Pro has a maximum tier, so a Maximum choice steps down when moving to Flash.
  */
 export function normalize(config: ModelConfig): ModelConfig {
   const model: ModelId = config.model === PRO ? PRO : FLASH;
   const thinking = config.thinking === true;
-  // `xhigh` survives only on Pro; every other rung (low/medium/max) becomes high.
-  const effort: Effort = config.effort === "xhigh" && model === PRO ? "xhigh" : "high";
+  // Anything outside DeepSeek's accepted set becomes `high`. That covers a config
+  // saved by an older build (which stored `xhigh`), a rung belonging to another
+  // provider, and `max` on Flash, which offers no maximum tier.
+  let effort: Effort = ACCEPTED_EFFORTS.has(config.effort) ? config.effort : "high";
+  if (effort === "max" && model !== PRO) effort = "high";
   return { model, thinking, effort };
 }
 

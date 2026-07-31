@@ -47,12 +47,22 @@ export function renderMessages(req: ModelRequest): ChatMessage[] {
   return messages;
 }
 
-/** Build the shared request body for both the buffered and streaming paths.
- *  Reasoning is a body toggle on DeepSeek V4: thinking mode adds
- *  `thinking: { type: "enabled" }` plus a `reasoning_effort` budget; non-thinking
- *  omits both. (Thinking mode also returns a separate `reasoning_content`, which
- *  only reaches the live UI — never the stored transcript.) */
-function buildBody(req: ModelRequest): Record<string, unknown> {
+/**
+ * Build the shared request body for both the buffered and streaming paths.
+ *
+ * Reasoning is a body toggle on DeepSeek V4: thinking mode adds
+ * `thinking: { type: "enabled" }` plus a `reasoning_effort` budget. The `thinking`
+ * field is ALWAYS sent, one way or the other — DeepSeek's own docs say omitting it
+ * entirely defaults to enabled at high effort, not disabled. So every internal
+ * call that never sets `req.model` (the session-memory summarizer, the web-page
+ * distiller) was silently paying for full reasoning it never asked for and the UI
+ * was never going to show, since reasoning deltas are discarded unconditionally.
+ * Sending an explicit `{ type: "disabled" }` is what actually turns it off.
+ *
+ * (Thinking mode also returns a separate `reasoning_content`, which reaches the
+ * live UI as a delta — never the stored transcript.)
+ */
+export function buildBody(req: ModelRequest): Record<string, unknown> {
   const cfg = req.model;
   const tools = req.tools ?? [];
   const body: Record<string, unknown> = {
@@ -62,6 +72,8 @@ function buildBody(req: ModelRequest): Record<string, unknown> {
   if (cfg?.thinking) {
     body.thinking = { type: "enabled" };
     body.reasoning_effort = cfg.effort;
+  } else {
+    body.thinking = { type: "disabled" };
   }
   if (tools.length > 0) {
     body.tools = tools;
@@ -104,6 +116,11 @@ export async function toolTurn(req: ModelRequest, options: TurnOptions = {}): Pr
  * Map an OpenAI-shaped `finish_reason` onto the shared stop reason. `stop` and
  * `tool_calls` are both a normal finish; `length` means the answer was cut off
  * mid-sentence, which the engine has to be able to tell apart from a real ending.
+ *
+ * `insufficient_system_resource` is DeepSeek-specific, not part of the OpenAI
+ * spec: the request was cut off by DeepSeek's own infrastructure, not a token
+ * limit or a safety decision. Without a case for it, it fell through to `"end"` —
+ * a resource-starved, incomplete reply reported as a clean finish.
  */
 export function toStop(reason: string | null | undefined): StopReason {
   switch (reason) {
@@ -111,6 +128,8 @@ export function toStop(reason: string | null | undefined): StopReason {
       return "truncated";
     case "content_filter":
       return "refused";
+    case "insufficient_system_resource":
+      return "overloaded";
     default:
       return "end";
   }

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { isMultiRoot, relativize, rootLabel, rootsOf, searchUnits, type SearchUnit } from "./paths.js";
 import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
+import { SEARCH_EXCLUDE_GLOBS, excludedFromSearch } from "./guard.js";
 import { ripgrepAvailable, runRipgrep } from "./ripgrep.js";
 
 const MAX_FILES = 5_000;
@@ -138,6 +139,10 @@ async function grepViaRipgrep(o: GrepOpts): Promise<UnitResult> {
   const args: string[] = ["--hidden", "--path-separator", "/"];
   // Skip the same noise directories the walk does, regardless of .gitignore.
   for (const dir of DEFAULT_IGNORES) args.push("-g", `!${dir}`);
+  // `--hidden` above means ripgrep would otherwise descend into dot-directories,
+  // which is exactly where secrets and other agents' saved sessions live. Exclude
+  // them so a search can't print what a direct read would refuse.
+  for (const pattern of SEARCH_EXCLUDE_GLOBS) args.push("-g", `!${pattern}`);
 
   if (o.caseInsensitive) args.push("-i");
   if (o.mode === "files_with_matches") args.push("-l");
@@ -178,10 +183,11 @@ async function grepViaWalk(o: GrepOpts): Promise<UnitResult> {
   const target = o.unit.sub ? join(o.unit.root, o.unit.sub) : o.unit.root;
   let files: { abs: string; rel: string }[];
   if (o.isFile) {
-    files = [{ abs: target, rel: relativize(o.ctx, target) }];
+    files = excludedFromSearch(target) ? [] : [{ abs: target, rel: relativize(o.ctx, target) }];
   } else {
     const walked = await walkFiles(target, MAX_FILES);
-    files = walked.files;
+    // Same exclusions the ripgrep path applies, for the no-ripgrep fallback.
+    files = walked.files.filter((f) => !excludedFromSearch(f.abs));
     if (o.glob) {
       const g = globToRegExp(o.glob);
       files = files.filter((f) => g.test(f.rel));

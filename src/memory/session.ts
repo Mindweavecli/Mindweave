@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { ToolContext } from "../tools/types.js";
 import { resolvePath, nextTouch } from "../tools/paths.js";
 import type { Session, Entry } from "./types.js";
-import { latestSession, loadMeta, loadTranscript, loadSessionNotes } from "./store.js";
+import { latestSession, listSessions, loadMeta, loadTranscript, loadSessionNotes } from "./store.js";
 import { startChassis } from "../alternator/lane.js";
 import { BackgroundShells } from "../tools/backgroundShells.js";
 import { Checkpoints } from "../tools/checkpoints.js";
@@ -131,12 +131,13 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
 
 /** A brand-new session rooted at `cwd` (defaults to the process cwd). */
 export async function createSession(cwd: string = process.cwd()): Promise<Session> {
-  const [projectMemory, memoryIndex, projectContext, governance, modelConfig] = await Promise.all([
+  const [projectMemory, memoryIndex, projectContext, governance, modelConfig, earlier] = await Promise.all([
     loadProjectMemory(cwd),
     loadMemory(cwd),
     projectContextText(cwd),
     loadGovernance(cwd),
     loadModelConfig(cwd),
+    listSessions(cwd),
   ]);
   const toolContext = freshToolContext(cwd, governance, [cwd]);
   await seedProjectMemoryRead(toolContext, projectMemory);
@@ -149,6 +150,8 @@ export async function createSession(cwd: string = process.cwd()): Promise<Sessio
     projectMemory,
     memoryDir: memoryDir(cwd),
     memoryIndex,
+    // Everything already saved predates this brand-new session.
+    priorSessions: earlier.length,
     projectContext,
     governance,
     modelConfig,
@@ -215,14 +218,16 @@ export async function resumeSession(
   // so /continue resumes cleanly and the model re-checks the interrupted step.
   const transcript = reconcileInterruptedTools(loaded);
 
-  const [projectMemory, memoryIndex, projectContext, governance, modelConfig, sessionMemory] = await Promise.all([
-    loadProjectMemory(cwd),
-    loadMemory(cwd),
-    projectContextText(cwd),
-    loadGovernance(cwd),
-    loadModelConfig(cwd),
-    loadSessionNotes(cwd, meta.id),
-  ]);
+  const [projectMemory, memoryIndex, projectContext, governance, modelConfig, sessionMemory, saved] =
+    await Promise.all([
+      loadProjectMemory(cwd),
+      loadMemory(cwd),
+      projectContextText(cwd),
+      loadGovernance(cwd),
+      loadModelConfig(cwd),
+      loadSessionNotes(cwd, meta.id),
+      listSessions(cwd),
+    ]);
   // Restore any added roots that still exist on disk (primary first).
   const extra = (meta.extraRoots ?? []).filter((r) => existsSync(r));
   const roots = [cwd, ...extra];
@@ -237,6 +242,8 @@ export async function resumeSession(
     projectMemory,
     memoryDir: memoryDir(cwd),
     memoryIndex,
+    // The session being resumed is not "prior" to itself.
+    priorSessions: Math.max(0, saved.filter((m) => m.id !== meta.id).length),
     projectContext,
     governance,
     modelConfig,

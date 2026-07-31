@@ -30,7 +30,7 @@ import { promises as fs, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
-import { catastrophicCommandReason } from "./guard.js";
+import { catastrophicCommandReason, sensitiveCommandReason } from "./guard.js";
 import { forbiddenCommandReason, forbiddenCommandPatternReason } from "../governor/forbidden.js";
 import { requestForbiddenLift } from "./approval.js";
 import { killTree } from "./killTree.js";
@@ -108,6 +108,16 @@ export const runCommand: Tool = {
     const blocked = catastrophicCommandReason(command);
     if (blocked) {
       return fail(`Refusing to run this command: it looks like ${blocked}.`);
+    }
+    // A shell would sidestep every per-file gate the read/write tools enforce.
+    const sensitive = sensitiveCommandReason(command);
+    if (sensitive) {
+      return fail(
+        `Refusing to run this command: it would print the contents of ${sensitive} into ` +
+          `the conversation. Checking whether the file exists, listing it, or copying it ` +
+          `is fine — reading it out is not. If you genuinely need what's inside, use ` +
+          `read_file, which asks the user first.`,
+      );
     }
     const forbidden = forbiddenCommandReason(ctx.governance?.forbidden, command);
     if (forbidden) {

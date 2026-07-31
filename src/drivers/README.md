@@ -70,6 +70,10 @@ not craft** — it must never add "how to code" instructions for a model.
 Rule of thumb: if a change makes *every* model behave differently, it's core. If it
 makes *one* model better and touches nothing else, it's a driver.
 
+The full version of that decision, including what breaks for other providers and
+the traps we have already hit, is in [BOUNDARY.md](../../BOUNDARY.md) at the repo
+root. Read it before your first change.
+
 ---
 
 ## The contract

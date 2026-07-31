@@ -2,7 +2,7 @@
  * shellLint.ts — a conservative advisory for bash-isms in a Windows PowerShell
  * command (pure, so it's unit-tested).
  *
- * DeepSeek (and most models) are bash-trained but Mindweave runs commands in
+ * Models are overwhelmingly bash-trained, but Mindweave runs commands in
  * powershell.exe (5.1) on Windows, where some bash constructs silently break:
  * `&&`/`||` are parse errors, `2>/dev/null` isn't a thing, and tools like `grep`
  * / `sed` / `head` don't exist. This returns a short note the caller appends to

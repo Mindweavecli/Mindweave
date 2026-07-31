@@ -82,6 +82,18 @@ export interface Session {
   memoryDir: string;
   memoryIndex: string;
   /**
+   * How many EARLIER sessions this project already has on disk, not counting the
+   * current one. Surfaced in the system prompt so the model knows its own past
+   * work exists and can point the user at `/continue`.
+   *
+   * Without this it has no way to know: transcripts are on disk but nothing loads
+   * or announces them, so asked "what did we do last time?" it would answer that
+   * it has no record — while a 70KB transcript of that exact work sat unread. It
+   * is a COUNT, not the content: resuming is the user's call, and reading a whole
+   * past session into every new one would be enormously wasteful.
+   */
+  priorSessions: number;
+  /**
    * The project orientation snapshot (environment + git + signals + tree),
    * rendered for the system prompt. Captured once at session start — a snapshot
    * in time, like the rest of the startup context. "" if nothing useful.

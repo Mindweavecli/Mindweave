@@ -10,9 +10,9 @@
  */
 import { promises as fs } from "node:fs";
 import type { ToolContext, ToolResult } from "./types.js";
-import { protectedPathReason } from "./guard.js";
+import { foreignAgentReason, protectedPathReason } from "./guard.js";
 import { forbiddenPathReason } from "../governor/forbidden.js";
-import { requestForbiddenLift } from "./approval.js";
+import { requestAgentDataAccess, requestForbiddenLift } from "./approval.js";
 import { resolvePath } from "./paths.js";
 import { detectEol } from "./eol.js";
 
@@ -39,6 +39,14 @@ export async function prepareEditTarget(
 
   const blocked = protectedPathReason(filePath);
   if (blocked) return { ok: false, error: fail(`Refusing to edit ${rawPath}: it is ${blocked}.`) };
+
+  // Another tool's data. Writing to it is worse than reading it — we'd be editing
+  // a history we were never part of — so it goes through the same ask-first gate.
+  const otherTool = foreignAgentReason(filePath);
+  if (otherTool) {
+    const denied = await requestAgentDataAccess(ctx, otherTool, `${verb} ${rawPath}`);
+    if (denied) return { ok: false, error: denied };
+  }
 
   const forbidden = forbiddenPathReason(ctx.governance?.forbidden, filePath);
   if (forbidden) {

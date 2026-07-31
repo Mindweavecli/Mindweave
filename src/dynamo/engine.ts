@@ -63,6 +63,7 @@ export function staticSystemPrompt(
   memoryIndex: string,
   governance: GovernancePrompt,
   workspace: string,
+  priorSessions = 0,
 ): string {
   let prompt = basePrompt(commandShellLabel());
 
@@ -121,6 +122,19 @@ The project provides this context in its MINDWEAVE.md — treat it as background
 ${projectMemory}
 </project_memory>`;
   }
+  // Its own past work in this project. The transcripts are on disk but nothing
+  // loads them, so without this line the model believes it has never been here —
+  // and, asked what happened last time, will say so while a full transcript of
+  // that exact work sits unread. Deliberately the COUNT and not the content:
+  // resuming is the user's decision, and replaying old sessions into every new
+  // one would be ruinously expensive.
+  if (priorSessions > 0) {
+    const s = priorSessions === 1 ? "" : "s";
+    prompt += `
+
+You have worked in this project before: ${priorSessions} earlier session${s} of yours are saved. You cannot see what was said in them from here. If the user refers to previous work, or you need that history, tell them it exists and that \`/continue\` resumes a past session — do not go looking for it elsewhere, and never present another tool's saved conversations as your own.`;
+  }
+
   if (memoryDir) {
     prompt += `
 
@@ -406,6 +420,7 @@ function buildRequest(
       session.memoryIndex,
       gov,
       workspaceText(session),
+      session.priorSessions,
     ),
     messages,
     context: volatileContext(
@@ -889,6 +904,8 @@ export function stopReasonNote(stop: Exclude<StopReason, "end">): string {
       return "the provider's safety filter declined this request";
     case "overflow":
       return "the conversation no longer fits the model's context window";
+    case "overloaded":
+      return "the provider's infrastructure cut the request off before it finished, so the reply above is incomplete";
   }
 }
 

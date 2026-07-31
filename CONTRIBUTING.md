@@ -14,6 +14,11 @@ Whether you're fixing a typo, adding a feature, or optimizing model performance 
 * Modular Provider Drivers: Clean isolation between the core agent orchestrator and individual LLM API implementations (/drivers).
 * Empirical Optimization: Tailoring prompt formats, tool-calling loops, and context caching per provider rather than using generic wrappers.
 
+> **Read [BOUNDARY.md](BOUNDARY.md) before writing code.** It is one page and it
+> answers the question every change in this repo has to answer first: does this
+> belong in the shared core, or in one provider's driver? Getting that wrong is how
+> a multi-provider agent slowly turns into a single-provider agent with extra steps.
+
 ---
 
 ## Call for Model Specialists & Domain Engineers

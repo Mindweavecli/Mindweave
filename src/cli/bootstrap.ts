@@ -109,8 +109,10 @@ function ensureGlobalTemplate(): void {
           "ANTHROPIC_API_KEY=\n" +
           "\n" +
           "# Optional overrides:\n" +
-          "# MINDWEAVE_MODEL=deepseek-v4-flash\n" +
-          "# MINDWEAVE_BASE_URL=https://api.deepseek.com\n",
+          "# MINDWEAVE_MODEL — which model to start with. Run /model in Mindweave for the list.\n" +
+          "# MINDWEAVE_MODEL=\n" +
+          "# MINDWEAVE_BASE_URL — overrides the DeepSeek endpoint only.\n" +
+          "# MINDWEAVE_BASE_URL=\n",
         { mode: 0o600 },
       );
     }

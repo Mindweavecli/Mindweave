@@ -16,9 +16,9 @@
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import type { Tool, ToolResult } from "./types.js";
-import { protectedPathReason } from "./guard.js";
+import { foreignAgentReason, protectedPathReason } from "./guard.js";
 import { forbiddenPathReason } from "../governor/forbidden.js";
-import { requestForbiddenLift } from "./approval.js";
+import { requestAgentDataAccess, requestForbiddenLift } from "./approval.js";
 import { recordWrite, relativize, resolvePath } from "./paths.js";
 import { writeDetail, withScope } from "./detail.js";
 import { applyEol, dirEol, fileEol } from "./eol.js";
@@ -59,6 +59,12 @@ export const writeFile: Tool = {
     const blocked = protectedPathReason(filePath);
     if (blocked) {
       return fail(`Refusing to write ${rawPath}: it is ${blocked}.`);
+    }
+    // Another tool's data — ask before writing into a history we weren't part of.
+    const otherTool = foreignAgentReason(filePath);
+    if (otherTool) {
+      const denied = await requestAgentDataAccess(ctx, otherTool, `Writing ${rawPath}`);
+      if (denied) return denied;
     }
     const forbidden = forbiddenPathReason(ctx.governance?.forbidden, filePath);
     if (forbidden) {

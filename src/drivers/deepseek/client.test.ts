@@ -7,7 +7,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { consumeStream, renderMessages, toStop } from "./client.js";
+import { buildBody, consumeStream, renderMessages, toStop } from "./client.js";
+import { FLASH, PRO, normalize, thinkLevels } from "./manifest.js";
 import type { ModelRequest, StreamEvent } from "../types.js";
 
 // ── renderMessages: the cache-friendly request shape (universal) ───────────────
@@ -153,7 +154,85 @@ test("stop reasons map onto the shared set, so a truncated reply is detectable",
   assert.equal(toStop("tool_calls"), "end");
   assert.equal(toStop("length"), "truncated");
   assert.equal(toStop("content_filter"), "refused");
+  // DeepSeek-specific: infrastructure cut the request off, not a token limit or a
+  // safety decision. Must not silently read as a clean finish.
+  assert.equal(toStop("insufficient_system_resource"), "overloaded");
   // An unfamiliar or absent reason must not be reported as a failure.
   assert.equal(toStop(undefined), "end");
   assert.equal(toStop("something_new"), "end");
+});
+
+// ── thinking: ALWAYS sent explicitly, never omitted ────────────────────────────
+//
+// DeepSeek's own docs say omitting the `thinking` field defaults to ENABLED at
+// high effort — not disabled. Every request must say one or the other.
+
+const withMessages: ModelRequest = { system: "S", messages: [{ role: "user", content: "hi" }] };
+
+test("thinking on sends the enabled type plus the effort budget", () => {
+  const body = buildBody({ ...withMessages, model: { model: PRO, thinking: true, effort: "max" } });
+  assert.deepEqual(body.thinking, { type: "enabled" });
+  assert.equal(body.reasoning_effort, "max");
+});
+
+test("thinking off sends an EXPLICIT disabled type, never an omitted field", () => {
+  const body = buildBody({ ...withMessages, model: { model: "deepseek-v4-flash", thinking: false, effort: "high" } });
+  assert.deepEqual(body.thinking, { type: "disabled" });
+  assert.equal(body.reasoning_effort, undefined);
+});
+
+test("no model config at all (the internal summarizer/distiller calls) still disables thinking explicitly", () => {
+  // These calls never set req.model. Before the fix this meant the whole
+  // `thinking` field was omitted, which DeepSeek's API reads as "enabled" — so an
+  // internal call meant to be cheap was silently paying for full reasoning nobody
+  // asked for and nothing ever displayed.
+  const body = buildBody(withMessages);
+  assert.deepEqual(body.thinking, { type: "disabled" });
+});
+
+// ── reasoning_effort must be a value DeepSeek actually accepts ────────────────
+//
+// The shared Effort type is the union of every provider's ladder, so it contains
+// rungs DeepSeek has never had (`medium`, `xhigh` are Anthropic's). Sending one is
+// not a soft failure — the API does not recognize the value. Pro's "Maximum" once
+// sent `xhigh` for exactly this reason and silently did nothing.
+
+/** Exactly what DeepSeek's API reference documents for `reasoning_effort`. */
+const ACCEPTED = new Set(["low", "high", "max"]);
+
+test("every advertised /think level puts an ACCEPTED effort on the wire", () => {
+  for (const model of [FLASH, PRO]) {
+    for (const level of thinkLevels(model)) {
+      const body = buildBody({
+        ...withMessages,
+        model: { model, thinking: level.thinking, effort: level.effort },
+      });
+      if (!level.thinking) {
+        assert.equal(body.reasoning_effort, undefined, `${model}/${level.label}: no effort without thinking`);
+        continue;
+      }
+      assert.ok(
+        ACCEPTED.has(String(body.reasoning_effort)),
+        `${model}/${level.label} sends reasoning_effort="${body.reasoning_effort}", which DeepSeek does not accept`,
+      );
+    }
+  }
+});
+
+test("Pro's Maximum sends max, not another provider's xhigh", () => {
+  const max = thinkLevels(PRO).find((l) => l.label === "Maximum")!;
+  assert.equal(max.effort, "max");
+});
+
+test("normalize clamps any foreign or stale effort to something accepted", () => {
+  // "xhigh" is what older builds persisted to model.json; "medium" is Anthropic's.
+  for (const stale of ["xhigh", "medium", "minimal", "nonsense"] as const) {
+    const out = normalize({ model: PRO, thinking: true, effort: stale as never });
+    assert.ok(ACCEPTED.has(out.effort), `effort "${stale}" normalized to "${out.effort}"`);
+  }
+});
+
+test("Flash has no maximum tier, so max steps down there", () => {
+  assert.equal(normalize({ model: FLASH, thinking: true, effort: "max" }).effort, "high");
+  assert.equal(normalize({ model: PRO, thinking: true, effort: "max" }).effort, "max");
 });

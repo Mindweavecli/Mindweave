@@ -58,6 +58,66 @@ export async function requestForbiddenLift(
   };
 }
 
+const AGENT_ALLOW = "Yes, you can use it";
+const AGENT_DENY = "No, leave it alone";
+
+/**
+ * Ask before touching another coding agent's data (its saved sessions, memory,
+ * rules or skills).
+ *
+ * The default is NOT to look. Finding another tool's history in a project is like
+ * finding someone else's notebook on a shared desk: the right move is to say it's
+ * there, not to read it and start quoting it back as your own recollection. So the
+ * model surfaces it and the user decides.
+ *
+ * Returns `null` to proceed (the user allowed it), or a ToolResult the caller
+ * should return. A yes is remembered for the rest of the session, per tool, so the
+ * user is asked once rather than per file.
+ */
+export async function requestAgentDataAccess(
+  ctx: ToolContext,
+  tool: string,
+  action: string,
+): Promise<ToolResult | null> {
+  if (ctx.agentDataAllowed?.has(tool)) return null; // already allowed this session
+
+  const refusal =
+    `that belongs to ${tool}, a different coding tool that has worked in this project. ` +
+    `Its sessions, memory and rules are not yours. Tell the user it's there and let them decide.`;
+
+  if (!ctx.requestApproval) {
+    return { output: `Error: ${refusal}`, isError: true, summary: `skipped ${tool}'s data` };
+  }
+
+  const choice = await ctx.requestApproval(
+    `${action} belongs to ${tool}, another coding tool that has worked here.\n` +
+      `Its saved sessions, memory and rules are separate from mine. Use it anyway?`,
+    [AGENT_ALLOW, AGENT_DENY, DEFER],
+  );
+
+  if (choice === AGENT_ALLOW) {
+    if (!ctx.agentDataAllowed) ctx.agentDataAllowed = new Set();
+    ctx.agentDataAllowed.add(tool);
+    return null; // proceed
+  }
+  if (choice === DEFER) {
+    return {
+      output:
+        `Stopped: that is ${tool}'s data. The user will say how to proceed — wait for their ` +
+        `direction rather than reading it.`,
+      isError: true,
+      summary: `awaiting direction on ${tool}'s data`,
+    };
+  }
+  return {
+    output:
+      `Refused: ${refusal} Continue without it, and do not present anything from it as your ` +
+      `own history with the user.`,
+    isError: true,
+    summary: `left ${tool}'s data alone`,
+  };
+}
+
 /** Drop a pattern from the live (session-only) deny-list. A new object forces the
  *  matcher to recompile; the on-disk rule is left intact. */
 function liftForbidden(ctx: ToolContext, pattern: string): void {

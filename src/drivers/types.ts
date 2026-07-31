@@ -47,15 +47,18 @@ export interface ChatMessage {
  * Why the model stopped talking. Providers spell these differently; a driver maps
  * its own vocabulary onto this small set.
  *
- *   - `end`       — finished normally, or handed back tool calls to run.
- *   - `truncated` — hit the output ceiling mid-answer. The reply is INCOMPLETE.
- *   - `refused`   — the provider's safety layer declined. There is no answer.
- *   - `overflow`  — the conversation no longer fits the context window.
+ *   - `end`        — finished normally, or handed back tool calls to run.
+ *   - `truncated`  — hit the output ceiling mid-answer. The reply is INCOMPLETE.
+ *   - `refused`    — the provider's safety layer declined. There is no answer.
+ *   - `overflow`   — the conversation no longer fits the context window.
+ *   - `overloaded` — the provider's infrastructure cut the request off before it
+ *                    finished (not a token limit, not a refusal). Worth a plain
+ *                    retry later, the reply is INCOMPLETE the same as `truncated`.
  *
  * `truncated` is the one that matters most: without it a cut-off reply looks
  * exactly like a finished one, and the loop carries on with half an answer.
  */
-export type StopReason = "end" | "truncated" | "refused" | "overflow";
+export type StopReason = "end" | "truncated" | "refused" | "overflow" | "overloaded";
 
 /** What one model turn produced: free text and/or a set of tool calls. */
 export interface Turn {

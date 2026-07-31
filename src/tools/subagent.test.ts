@@ -111,6 +111,7 @@ function parentSession(): Session {
     projectMemory: "MEM",
     memoryDir: "/proj/.mem",
     memoryIndex: "IDX",
+    priorSessions: 0,
     projectContext: "CTX",
     governance: {} as Session["governance"],
     modelConfig: {} as Session["modelConfig"],

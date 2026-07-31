@@ -139,6 +139,13 @@ export interface ToolContext {
    */
   requestApproval?: (question: string, options: string[]) => Promise<string>;
   /**
+   * Other coding tools whose data the user has allowed this session, by name
+   * ("Claude Code", "Cursor", …). Another agent's sessions/memory/rules are not
+   * ours to read, so the tools ask first; a yes lands here so the user is asked
+   * once per tool rather than once per file. Session-only and never persisted.
+   */
+  agentDataAllowed?: Set<string>;
+  /**
    * Long-running commands that outlive a turn. run_command hands a process here on
    * timeout (or `run_in_background`); the shell tools read/kill/list through it, and
    * the engine drains its completion events. Client-side (holds live process
