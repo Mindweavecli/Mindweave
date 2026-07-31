@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Nimannns/Mindweave/blob/main/LICENSE">Apache 2.0</a> &nbsp;•&nbsp;
-  <a href="https://github.com/Nimannns/Mindweave/stargazers">Stars</a> &nbsp;•&nbsp;
+  <a href="https://github.com/mindweave-cli/Mindweave/blob/main/LICENSE">Apache 2.0</a> &nbsp;•&nbsp;
+  <a href="https://github.com/mindweave-cli/Mindweave/stargazers">Stars</a> &nbsp;•&nbsp;
   <a href="https://x.com/mindweavecli">X (Twitter)</a>
 </p>
 
@@ -17,6 +17,15 @@
 MindWeave is a coding agent that lives in your terminal and works directly inside your repository — reading, searching, editing, running commands, and verifying its own work. It runs **entirely on your machine**: your code and your API key never touch a MindWeave server.
 
 It's built lean on purpose. Instead of burning your context budget on heavy scaffolding, MindWeave keeps prompts thin and leaves the model room to actually reason about your code.
+
+## v1.1 is out
+
+Claude joins DeepSeek as a second supported provider, and the driver system that makes that possible is now real rather than planned:
+
+- **Anthropic (Claude) support.** Run `claude-sonnet-5` or `claude-opus-5` right alongside DeepSeek, switching anytime with `/model`.
+- **Providers load on demand.** Only the driver for the model you picked ever loads. A DeepSeek user never pays the cost of Anthropic's SDK, and that stays true as more providers are added.
+- **Setup asks for the right key.** First launch, or switching to a provider you have not used yet, prompts for that provider's key specifically instead of assuming you're on DeepSeek.
+- **Cut off replies are caught, not hidden.** If a model hits its output limit or a provider declines a request, MindWeave now tells you plainly instead of quietly treating a half finished answer as complete.
 
 ## Features
 
@@ -41,7 +50,7 @@ It's built lean on purpose. Instead of burning your context budget on heavy scaf
 MindWeave installs from source:
 
 ```bash
-git clone https://github.com/Nimannns/Mindweave
+git clone https://github.com/mindweave-cli/Mindweave
 cd Mindweave
 npm install
 npm run build
@@ -59,13 +68,14 @@ On first launch, MindWeave asks for your API key and saves it to `~/.mindweave/.
 
 ### Your key
 
-MindWeave is **bring-your-own-key**. The first supported model is **DeepSeek**:
+MindWeave is **bring-your-own-key**. Two providers ship today:
 
 ```
-DEEPSEEK_API_KEY=your-key-here
+DEEPSEEK_API_KEY=your-key-here     # deepseek-v4-flash, deepseek-v4-pro
+ANTHROPIC_API_KEY=your-key-here    # claude-sonnet-5, claude-opus-5
 ```
 
-Set it during the first-run prompt, in `~/.mindweave/.env`, or as an environment variable.
+You only need the key for the provider whose models you use. Set both and you can switch between them with `/model` in the same project. Set a key during the first-run prompt, in `~/.mindweave/.env`, or as an environment variable.
 
 ## Choosing a model
 
@@ -83,7 +93,8 @@ Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/driv
 - [x] Per-project governor (rules / skills / forbidden)
 - [x] DeepSeek driver
 - [x] **v1.0 — first public release**
-- [ ] More model drivers (Anthropic, OpenAI, Qwen, Ollama, …) — community-built
+- [x] **v1.1: Anthropic (Claude) driver, providers loaded on demand, provider-aware setup, cut off replies caught**
+- [ ] More model drivers (OpenAI, Qwen, Ollama, …) — community-built
 - [ ] External tool-server support
 - [ ] Verified macOS / Linux support
 

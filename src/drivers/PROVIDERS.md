@@ -10,11 +10,12 @@ lean no matter how many providers exist.
 
 ## Available now
 
-| Provider | Models | Notes |
-| --- | --- | --- |
-| **DeepSeek** | `deepseek-v4-flash`, `deepseek-v4-pro` | The default. Flash is fast & cheap; Pro is stronger for harder work. |
+| Provider | Models | Key | Notes |
+| --- | --- | --- | --- |
+| **DeepSeek** | `deepseek-v4-flash`, `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | The default. Flash is fast and cheap; Pro is stronger for harder work. |
+| **Anthropic** | `claude-sonnet-5`, `claude-opus-5` | `ANTHROPIC_API_KEY` | Sonnet 5 is fast and strong at code; Opus 5 is the most capable. Four reasoning levels each. |
 
-More providers (Anthropic, OpenAI, Qwen, Ollama, …) are on the way — each added as a
+More providers (OpenAI, Qwen, Ollama, …) are on the way — each added as a
 community-built driver. See the roadmap in the repo.
 
 ## Picking a model
@@ -27,11 +28,13 @@ Your choice is remembered per project.
 ## Setting your key
 
 Set the provider's key as an environment variable, or put it in your config `.env`
-so it works in every project. For DeepSeek:
+so it works in every project:
 
 ```
 DEEPSEEK_API_KEY=your-key-here
+ANTHROPIC_API_KEY=your-key-here
 ```
 
-Each provider reads its own key (e.g. `DEEPSEEK_API_KEY`, later `ANTHROPIC_API_KEY`,
-and so on). Keys stay on your machine — they're never uploaded anywhere.
+You only need a key for the provider whose models you actually use. Set both and
+you can switch between them with `/model` in the same project. Keys stay on your
+machine — they're never uploaded anywhere.

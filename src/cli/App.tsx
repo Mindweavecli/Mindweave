@@ -28,7 +28,8 @@ import { appendForbidden, appendForbiddenCommand } from "../governor/write.js";
 import { addRoot, removeRoot } from "../tools/workspace.js";
 import { discoverRelatedRoots } from "../tools/workspaceDiscover.js";
 import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
-import { MODELS, thinkLevels, thinkLabel, modelLabel, withModel, saveModelConfig } from "../dynamo/model.js";
+import { MODELS, DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, withModel, saveModelConfig } from "../dynamo/model.js";
+import { manifestForModel } from "../drivers/registry.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
 import { completePath } from "./pathComplete.js";
 import { hasApiKey, saveApiKey, globalEnvPath } from "./bootstrap.js";
@@ -39,15 +40,26 @@ import { initialState, reduce, type Action, type Block, type TranscriptState } f
 import { planToolReveal, TOOL_GRACE_MS } from "./reveal.js";
 import { toolDisplay, isGroupable } from "./toolDisplay.js";
 import { summarizeTask, formatTokens, type TaskUsage } from "../dynamo/pricing.js";
-import type { Usage } from "../dynamo/deepseek.js";
+import type { Usage } from "../drivers/types.js";
 import type { ShellInfo } from "../tools/backgroundShells.js";
 import type { Entry, Session, SessionMeta } from "../memory/types.js";
 import { DEFAULT_MODE, modeById, nextMode, type ModeId } from "./modes.js";
 
-// Where to send people to get a key / read more. DeepSeek's key page is the real,
-// useful link; the docs link is Mindweave's site (set when it's live).
-const DEEPSEEK_KEYS_URL = "https://platform.deepseek.com/api_keys";
 const MINDWEAVE_DOCS_URL = "https://mindweave.dev";
+
+/** The provider whose key we're missing, and what to tell the user about it. */
+type KeyNeed = { envVar: string; label: string; keysUrl: string };
+
+/**
+ * The key a model needs, or null if we already have it. Each provider declares
+ * its own variable name and key page, so this stays correct as providers are
+ * added — nothing here names a provider.
+ */
+function missingKeyFor(model: string): KeyNeed | null {
+  const provider = manifestForModel(model);
+  if (hasApiKey(provider.apiKeyEnv)) return null;
+  return { envVar: provider.apiKeyEnv, label: provider.label, keysUrl: provider.keysUrl };
+}
 
 /**
  * An interactive overlay that temporarily takes over the keyboard (rendered as a
@@ -110,9 +122,12 @@ export function App() {
   const usageSamples = useRef<Usage[]>([]);
   // Aborts the in-flight turn when the user presses Esc (created fresh per turn).
   const abortRef = useRef<AbortController | null>(null);
-  // True until a DeepSeek key is available. When set, we show the one-time setup
-  // screen instead of the prompt and watch for the key to appear.
-  const [needsKey, setNeedsKey] = useState(!hasApiKey());
+  // Which provider's key we still need, or null once we have it. Not a bare
+  // boolean: with more than one provider, the key we must ask for depends on the
+  // model the user is about to run, and switching models can make a different key
+  // become the missing one.
+  const [keyNeed, setKeyNeed] = useState<KeyNeed | null>(() => missingKeyFor(DEFAULT_MODEL_CONFIG.model));
+  const needsKey = keyNeed !== null;
   // The key the user is typing on the welcome screen.
   const [keyInput, setKeyInput] = useState("");
   // Sent-message history, oldest-first — walked with ↑/↓ in the input.
@@ -270,6 +285,9 @@ export function App() {
       attachApproval(s);
       session.current = s;
       setReady(true);
+      // The project may have a model saved from a different provider than the
+      // default, so re-check against what we're actually about to run.
+      if (session.current) setKeyNeed(missingKeyFor(session.current.modelConfig.model));
     });
   }, []);
 
@@ -297,9 +315,10 @@ export function App() {
   function handleKeySubmit(value: string) {
     const key = value.trim();
     if (!key) return;
-    saveApiKey(key);
+    if (!keyNeed) return;
+    saveApiKey(keyNeed.envVar, key);
     setKeyInput("");
-    setNeedsKey(false);
+    setKeyNeed(null);
     note("key saved on this machine — you're all set. ask me anything.");
   }
 
@@ -618,6 +637,8 @@ export function App() {
     s.modelConfig = withModel(s.modelConfig, choice.id);
     await saveModelConfig(s.cwd, s.modelConfig);
     note(`model → ${modelLabel(s.modelConfig.model)} · ${thinkLabel(s.modelConfig)}`);
+    // Switching provider can mean we now need a key we've never been given.
+    setKeyNeed(missingKeyFor(s.modelConfig.model));
   }
 
   // Apply a /think pick for the current model: set thinking + effort, persist, confirm.
@@ -964,8 +985,9 @@ export function App() {
     await streamRespond(s);
   }
 
-  // One-time key setup screen (shown until a key is configured).
-  if (needsKey) {
+  // Key setup screen. Shown on first run, and again if the user switches to a
+  // provider they haven't given a key for yet.
+  if (keyNeed) {
     return (
       <Box flexDirection="column" paddingX={1}>
         <Box marginBottom={1}>
@@ -974,7 +996,7 @@ export function App() {
         </Box>
         <Text>Welcome to Mindweave — your terminal coding agent. Let's set you up, one time only.</Text>
         <Box marginTop={1}>
-          <Text>Paste your DeepSeek API key to start chatting:</Text>
+          <Text>Paste your {keyNeed.label} API key to start chatting:</Text>
         </Box>
         <Box marginTop={1}>
           <Text bold color="cyan">{"  key › "}</Text>
@@ -987,13 +1009,13 @@ export function App() {
           />
         </Box>
         <Box marginTop={1} flexDirection="column">
-          <Text dimColor>Don't have one? Get a key at {DEEPSEEK_KEYS_URL}</Text>
+          <Text dimColor>Don't have one? Get a key at {keyNeed.keysUrl}</Text>
           <Text dimColor>Learn more: {MINDWEAVE_DOCS_URL}</Text>
         </Box>
         <Box marginTop={1}>
           <Text dimColor>
             Your key is saved only on this machine ({globalEnvPath()}) and is sent only to
-            DeepSeek on your own requests — never to us. You won't be asked again.
+            {" "}{keyNeed.label} on your own requests — never to us. You won't be asked again.
           </Text>
         </Box>
       </Box>

@@ -13,5 +13,5 @@ JSON.
 
 ## Files
 - `engine.ts` — the engine step: `respond(history)` returns Mindweave's next reply.
-- `deepseek.ts` — the DeepSeek provider client (the actual HTTP call). Other
-  providers will each get their own client file later.
+- The provider client lives in `../drivers/<provider>/`, not here. The engine
+  holds one `Driver` (see `../drivers/types.ts`) and never names a provider.

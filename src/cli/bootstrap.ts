@@ -8,7 +8,7 @@
  *
  *   1. ~/.mindweave/.env   — the global store (write your key here once).
  *   2. <project>/.env  — per-project overrides (optional).
- *   3. real shell env  — always wins (export DEEPSEEK_API_KEY=… for a one-off).
+ *   3. real shell env  — always wins (export a provider's key for a one-off).
  *
  * We parse `.env` ourselves (a tiny, dependency-free reader) so we control that
  * precedence exactly: a value is only applied if the variable isn't already set,
@@ -44,28 +44,36 @@ export function loadConfig(cwd: string = process.cwd()): void {
  * Re-read the env files into process.env without recreating the template. Used to
  * pick up a key the user just pasted while Mindweave is already running — once a real
  * key appears we adopt it with no restart. (Empty values are ignored, so the
- * blank `DEEPSEEK_API_KEY=` line in the fresh template never counts as "set".)
+ * blank key lines in the fresh template never count as "set".)
  */
 export function reloadConfig(cwd: string = process.cwd()): void {
   applyEnvFile(join(cwd, ".env"));
   applyEnvFile(globalEnvPath());
 }
 
-/** True once a DeepSeek key is available from any source. */
-export function hasApiKey(): boolean {
-  return Boolean(process.env.DEEPSEEK_API_KEY);
+/**
+ * True once the named provider's key is available from any source.
+ *
+ * The variable name is a parameter rather than a constant because which key is
+ * needed depends on which model the user is about to run — each provider declares
+ * its own in its manifest. This module stays a plain config utility and never
+ * imports the driver registry.
+ */
+export function hasApiKey(envVar: string): boolean {
+  return Boolean(process.env[envVar]);
 }
 
 /**
  * Persist a key the user typed in the terminal: write it into ~/.mindweave/.env (so
  * it's there next launch too) and apply it to this process right away (so the
- * chat can start immediately — no restart). Updates the existing
- * DEEPSEEK_API_KEY line in place, preserving the rest of the file.
+ * chat can start immediately — no restart). Updates that provider's line in place,
+ * preserving every other line, so adding a second provider's key never disturbs
+ * the first one.
  */
-export function saveApiKey(key: string): void {
+export function saveApiKey(envVar: string, key: string): void {
   const trimmed = key.trim();
   if (!trimmed) return;
-  process.env.DEEPSEEK_API_KEY = trimmed;
+  process.env[envVar] = trimmed;
 
   const dir = globalConfigDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -77,9 +85,10 @@ export function saveApiKey(key: string): void {
   } catch {
     /* no file yet */
   }
-  const line = `DEEPSEEK_API_KEY=${trimmed}`;
-  const next = /^\s*DEEPSEEK_API_KEY=.*$/m.test(existing)
-    ? existing.replace(/^\s*DEEPSEEK_API_KEY=.*$/m, line)
+  const line = `${envVar}=${trimmed}`;
+  const pattern = new RegExp(`^\\s*${envVar}=.*$`, "m");
+  const next = pattern.test(existing)
+    ? existing.replace(pattern, line)
     : (existing ? existing.replace(/\s*$/, "\n") : "") + line + "\n";
   writeFileSync(path, next, { mode: 0o600 });
 }
@@ -94,8 +103,10 @@ function ensureGlobalTemplate(): void {
       writeFileSync(
         path,
         "# Mindweave global config — applies in every project.\n" +
-          "# Paste your DeepSeek API key below (no quotes needed):\n" +
+          "# Paste a key below (no quotes needed). You only need the one for the\n" +
+          "# provider whose models you actually use; set both to switch with /model.\n" +
           "DEEPSEEK_API_KEY=\n" +
+          "ANTHROPIC_API_KEY=\n" +
           "\n" +
           "# Optional overrides:\n" +
           "# MINDWEAVE_MODEL=deepseek-v4-flash\n" +

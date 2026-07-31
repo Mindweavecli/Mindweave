@@ -16,8 +16,11 @@
  * regexes match on the ASCII keywords (DSML / tool_calls / invoke / parameter) and
  * absorb the surrounding delimiter characters, so they're robust to the exact
  * special glyphs DeepSeek uses.
+ *
+ * This is a model-specific parsing fix, which is why it lives inside the driver
+ * rather than in core.
  */
-import type { ToolCall } from "./deepseek.js";
+import type { ToolCall } from "../types.js";
 
 const BLOCK_RE = /<[^<>]*DSML[^<>]*tool_calls\s*>[\s\S]*?<\/[^<>]*DSML[^<>]*tool_calls\s*>/g;
 const INVOKE_RE = /<[^<>]*DSML[^<>]*invoke[^<>]*name="([^"]+)"[^<>]*>([\s\S]*?)<\/[^<>]*DSML[^<>]*invoke[^<>]*>/g;
@@ -57,8 +60,8 @@ export function parseInlineToolCalls(content: string): ParsedInline {
         const key = p[1]!;
         const attrs = p[2] ?? "";
         const raw = p[3]!.trim();
-        // A common convention DeepSeek mirrors: a parameter is a string
-        // unless it's flagged `string="false"`, in which case its value is JSON.
+        // The convention DeepSeek follows: a parameter is a string unless it's
+        // flagged `string="false"`, in which case its value is JSON.
         args[key] = /string="false"/i.test(attrs) ? tryJson(raw) : raw;
       }
       toolCalls.push({ id: `inline_${Date.now()}_${n++}`, name, arguments: JSON.stringify(args) });

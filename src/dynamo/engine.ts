@@ -13,7 +13,8 @@
  * the read-only tool exactly like any other tool call — so this whole function
  * can later move to a server unchanged, with tools executing on the client.
  */
-import { streamTurn, toolTurn, type ChatMessage, type ModelRequest, type StreamResult, type Usage, type WireToolCall } from "./deepseek.js";
+import { activeDriver, ensureDriver } from "../drivers/registry.js";
+import type { ChatMessage, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
 import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, VERIFY_NUDGE } from "./verify.js";
 import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, interpretGuardChoice } from "./guard.js";
@@ -463,6 +464,11 @@ export function callIsConcurrencySafe(
 }
 
 export async function respond(session: Session, options: RespondOptions = {}): Promise<string> {
+  // Make sure the provider serving the selected model is loaded before anything
+  // in this turn reaches for it. Cached after the first call, so this is free on
+  // every subsequent turn, and it keeps `activeDriver()` safe to call synchronously
+  // from here down (including from inside a tool).
+  await ensureDriver(session.modelConfig.model);
   const planMode = session.toolContext.planMode ?? false;
   const tools = toolSchemas({ planMode, readOnlyOnly: session.toolContext.readOnlyTools });
   const lookup = (name: string) => findTool(name);
@@ -593,6 +599,16 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // may span several calls across tool rounds, and the UI sums them.
     emitUsage(result, options);
     if (result.usage) usages.push(result.usage);
+
+    // The provider can end a turn for reasons that are NOT "finished answering".
+    // Without checking, a reply cut off at the output ceiling looks identical to a
+    // complete one and the loop carries on with half an answer.
+    if (result.stop && result.stop !== "end") {
+      const note = stopReasonNote(result.stop);
+      if (content.trim()) session.transcript.push({ role: "assistant", content });
+      await options.persist?.();
+      return pauseTask(session, note);
+    }
 
     // No tool calls → the model is done. Record the reply.
     if (toolCalls.length === 0) {
@@ -860,11 +876,27 @@ function pauseTask(session: Session, reason: string): string {
   return pause;
 }
 
+/**
+ * Plain-language reason a turn ended early, for the pause message. Kept here (not
+ * in a driver) because it's user-facing copy: every provider maps its own
+ * vocabulary onto the shared StopReason, and the wording is the same either way.
+ */
+export function stopReasonNote(stop: Exclude<StopReason, "end">): string {
+  switch (stop) {
+    case "truncated":
+      return "the model hit its output limit mid-answer, so the reply above is incomplete";
+    case "refused":
+      return "the provider's safety filter declined this request";
+    case "overflow":
+      return "the conversation no longer fits the model's context window";
+  }
+}
+
 /** One streaming model call: forwards the model's reasoning/answer deltas to the
  *  UI as engine events, and returns the assembled turn (content + tool calls +
  *  usage) for the loop to record. */
 function streamModel(request: ModelRequest, options: RespondOptions): Promise<StreamResult> {
-  return streamTurn(request, {
+  return activeDriver().streamTurn(request, {
     signal: options.signal,
     onEvent: (e) => {
       if (e.type === "reasoning") options.onEvent?.({ type: "reasoning", delta: e.delta });
@@ -968,7 +1000,7 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
   let summary: string;
   try {
     // Summaries don't need reasoning — use the chosen model with thinking off.
-    const { content } = await toolTurn({
+    const { content } = await activeDriver().toolTurn({
       system: SUMMARY_SYSTEM_PROMPT,
       messages: [{ role: "user", content: `${formatTranscriptForSummary(session.transcript)}\n\n${SUMMARY_REQUEST}` }],
       model: { ...session.modelConfig, thinking: false },

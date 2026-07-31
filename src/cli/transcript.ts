@@ -19,7 +19,7 @@
  * invariant: a block only commits once it AND every earlier tail block is done, so
  * a later block can never print before an earlier one.
  */
-import { stripInlineToolCalls } from "../dynamo/inlineTools.js";
+import { sanitizeStreamText } from "../drivers/registry.js";
 import type { ToolKind } from "./toolDisplay.js";
 
 export type ToolStatus = "running" | "ok" | "error";
@@ -147,8 +147,9 @@ function closeToolGroup(s: TranscriptState): TranscriptState {
 function sealAssistant(s: TranscriptState, asReply: boolean): TranscriptState {
   const id = s.openAsstId;
   if (id == null) return asReply ? { ...s, lastReply: "" } : s;
-  // Strip any tool-call markup DeepSeek leaked into the text before showing it.
-  const text = stripInlineToolCalls(s.raw);
+  // Let the active driver repair anything its provider leaked into the text
+  // stream (the assembled turn is already clean; live deltas are not).
+  const text = sanitizeStreamText(s.raw);
   let next: TranscriptState = { ...s, openAsstId: null, raw: "" };
   if (text) next = patchTail(next, id, { text, done: true });
   else next = { ...next, tail: next.tail.filter((b) => b.id !== id) };

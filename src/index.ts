@@ -16,7 +16,7 @@ import { createElement } from "react";
 import { App } from "./cli/App.js";
 import { loadConfig } from "./cli/bootstrap.js";
 
-// Load config (global ~/.mindweave/.env + project .env) so DEEPSEEK_API_KEY is
+// Load config (global ~/.mindweave/.env + project .env) so provider API keys are
 // available no matter which project we're launched in.
 loadConfig();
 

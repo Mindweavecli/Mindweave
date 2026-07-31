@@ -11,36 +11,24 @@
  *   - cache % — how much of the input was served from the provider's prompt cache.
  *
  * Pure (no I/O beyond reading an env override) so it is trivially unit-tested. The
- * price table is provider-agnostic: add a model, add a row. Prices are estimates a
- * user can override, so the figure is honest about being approximate.
+ * per-model rates come from whichever driver serves that model, so this math stays
+ * provider-agnostic. Prices are estimates a user can override, so the figure is
+ * honest about being approximate.
  */
-import type { Usage } from "./deepseek.js";
+import { manifestForModel } from "../drivers/registry.js";
+import type { ModelPrice, Usage } from "../drivers/types.js";
 
-/** USD per 1,000,000 tokens, split by how each token was billed. */
-export interface ModelPrice {
-  /** Input tokens served from the prompt cache (cheap — this is why re-send is OK). */
-  cacheHit: number;
-  /** Fresh input tokens (the real cost of new context). */
-  cacheMiss: number;
-  /** Generated tokens. */
-  output: number;
-}
+export type { ModelPrice };
 
-// DeepSeek list prices (USD / 1M). Cache hits are ~1/10 of misses — the whole
-// reason re-sent context stays cheap. `-pro` is estimated higher; correct it if
-// needed. These are best-effort defaults: override any of them with the env var
-// MINDWEAVE_PRICE="hit,miss,out" (applies to all models) without a rebuild.
-const PRICES: Record<string, ModelPrice> = {
-  "deepseek-v4-flash": { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 },
-  "deepseek-v4-pro": { cacheHit: 0.028, cacheMiss: 0.28, output: 0.56 },
-};
-const DEFAULT_PRICE: ModelPrice = { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 };
-
-/** The price for a model id, honoring a MINDWEAVE_PRICE env override, else the table. */
+/**
+ * The price for a model id. A `MINDWEAVE_PRICE="hit,miss,out"` env override wins for
+ * every model (handy for correcting an estimate without a rebuild); otherwise the
+ * owning driver's rate table answers.
+ */
 export function priceFor(modelId?: string): ModelPrice {
   const override = parseEnvPrice(process.env.MINDWEAVE_PRICE);
   if (override) return override;
-  return (modelId && PRICES[modelId]) || DEFAULT_PRICE;
+  return manifestForModel(modelId ?? "").price(modelId ?? "");
 }
 
 /** Parse `MINDWEAVE_PRICE="hit,miss,out"` into a ModelPrice, or null if unset/invalid. */

@@ -20,7 +20,7 @@
  */
 import type { Session } from "./types.js";
 import { estimateEntriesTokens, estimateTokens, formatTranscriptForSummary } from "./compaction.js";
-import { toolTurn } from "../dynamo/deepseek.js";
+import { activeDriver } from "../drivers/registry.js";
 
 const env = (name: string, fallback: number): number => {
   const v = Number(process.env[name]);
@@ -138,7 +138,7 @@ export async function updateSessionMemory(session: Session): Promise<boolean> {
   if (recent.length === 0) return false;
   const current = session.sessionMemory?.trim() || SESSION_MEMORY_TEMPLATE;
   try {
-    const { content } = await toolTurn({
+    const { content } = await activeDriver().toolTurn({
       system: UPDATE_SYSTEM,
       messages: [
         {

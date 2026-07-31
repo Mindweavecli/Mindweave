@@ -21,7 +21,7 @@
  */
 import TurndownService from "turndown";
 import type { Tool, ToolResult } from "./types.js";
-import { toolTurn } from "../dynamo/deepseek.js";
+import { activeDriver } from "../drivers/registry.js";
 
 const FETCH_TIMEOUT_MS = 20_000;
 const DOWNLOAD_CAP_BYTES = 3_000_000; // stop reading a response past ~3MB
@@ -177,7 +177,7 @@ function htmlToMarkdown(html: string): string {
 /** One cheap model call to answer `prompt` from the page. null on any failure. */
 async function distill(content: string, prompt: string): Promise<string | null> {
   try {
-    const { content: answer } = await toolTurn({
+    const { content: answer } = await activeDriver().toolTurn({
       system:
         "You extract information from a web page to answer the user's request. " +
         "Answer only from the content provided; be concise and include relevant " +

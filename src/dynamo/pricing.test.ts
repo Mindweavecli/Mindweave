@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { summarizeTask, priceFor, formatTokens, formatCost, taskLimitReason } from "./pricing.js";
-import type { Usage } from "./deepseek.js";
+import type { Usage } from "../drivers/types.js";
 
 const u = (p: number, c: number, hit: number, miss: number): Usage => ({
   promptTokens: p,

@@ -2,72 +2,37 @@
  * model.ts — which model answers, and how hard it thinks.
  *
  * One small config object decides both: `/model` picks the model, `/think` picks
- * the reasoning level for that model. DeepSeek V4 exposes thinking as a toggle on
- * the same model id plus a `reasoning_effort` budget, so the whole space is:
- *
- *   Flash → Standard (no thinking) · Reasoning (thinking, high effort)
- *   Pro   → Standard · High (thinking, high) · Maximum (thinking, max effort)
+ * the reasoning level for that model. What those choices ARE is the driver's
+ * business (each provider exposes reasoning differently); this module owns only
+ * the parts that are the same for every provider — the shape of the config, the
+ * labels the UI renders, and making the choice sticky.
  *
  * The choice is sticky PER PROJECT (saved under the project's state dir, like
- * sessions and the governor), so it carries across sessions in that project. The
- * provider client (deepseek.ts) turns this into the request body; the pickers in
- * the CLI render from the same level tables — one source of truth.
+ * sessions and the governor), so it carries across sessions in that project.
+ * Loading a config also selects the driver that serves it, so the rest of the
+ * session talks to the right provider without ever naming one.
  */
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { projectDir } from "../memory/store.js";
+import { allModels, ensureDriver, manifestForModel, normalizeConfig } from "../drivers/registry.js";
+import type { Effort, ModelChoice, ModelConfig, ModelId, ThinkLevel } from "../drivers/types.js";
 
-export type ModelId = "deepseek-v4-flash" | "deepseek-v4-pro";
+export type { Effort, ModelChoice, ModelConfig, ModelId, ThinkLevel };
 
-/** Effort budget sent in thinking mode. `xhigh` maps to the provider's max. */
-export type Effort = "high" | "xhigh";
+/** The models offered by `/model`, across every installed provider. */
+export const MODELS: ModelChoice[] = allModels();
 
-export interface ModelConfig {
-  model: ModelId;
-  thinking: boolean;
-  /** Only meaningful when `thinking` is true. */
-  effort: Effort;
-}
-
-/** Flash, no thinking — fast and cheap, the out-of-the-box default. */
-export const DEFAULT_MODEL_CONFIG: ModelConfig = {
-  model: "deepseek-v4-flash",
+/** The out-of-the-box choice: the first offered model, no thinking. */
+export const DEFAULT_MODEL_CONFIG: ModelConfig = normalizeConfig({
+  model: MODELS[0]!.id,
   thinking: false,
   effort: "high",
-};
+});
 
-export interface ModelChoice {
-  id: ModelId;
-  label: string;
-  description: string;
-}
-
-/** The models offered by `/model`. */
-export const MODELS: ModelChoice[] = [
-  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", description: "fast & cheap — the default" },
-  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", description: "stronger, for harder work" },
-];
-
-export interface ThinkLevel {
-  label: string;
-  description: string;
-  thinking: boolean;
-  effort: Effort;
-}
-
-/** The reasoning levels offered by `/think`, which depend on the chosen model. */
+/** The reasoning levels offered by `/think` for a model. */
 export function thinkLevels(model: ModelId): ThinkLevel[] {
-  if (model === "deepseek-v4-flash") {
-    return [
-      { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" },
-      { label: "Reasoning", description: "think first, then answer", thinking: true, effort: "high" },
-    ];
-  }
-  return [
-    { label: "Standard", description: "answer directly", thinking: false, effort: "high" },
-    { label: "High", description: "deeper step-by-step reasoning", thinking: true, effort: "high" },
-    { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "xhigh" },
-  ];
+  return manifestForModel(model).thinkLevels(model);
 }
 
 /** The label of the reasoning level a config currently represents. */
@@ -84,31 +49,39 @@ export function modelLabel(model: ModelId): string {
 }
 
 /**
- * Switch the model while keeping the reasoning intent valid: Flash has no `xhigh`
- * level, so a Maximum-on-Pro choice clamps to high when moving to Flash.
+ * Switch the model, letting the owning provider keep the reasoning intent valid
+ * (a level the target model doesn't offer is clamped down rather than sent and
+ * rejected). Synchronous: it consults only manifests. The provider's wire code is
+ * loaded separately, by `ensureDriver`, before the next turn runs.
  */
 export function withModel(cfg: ModelConfig, model: ModelId): ModelConfig {
-  const next: ModelConfig = { ...cfg, model };
-  if (model === "deepseek-v4-flash" && next.thinking) next.effort = "high";
-  return next;
+  return normalizeConfig({ ...cfg, model });
 }
 
 function configPath(projectCwd: string): string {
   return join(projectDir(projectCwd), "model.json");
 }
 
-/** Load the project's saved model config, or the default when none is saved. */
+/**
+ * Load the project's saved model config, or the default when none is saved, and
+ * load the provider that serves it — this is where a session's provider gets
+ * decided, and the only place its wire code comes off disk.
+ */
 export async function loadModelConfig(projectCwd: string): Promise<ModelConfig> {
+  let config: ModelConfig;
   try {
     const raw = await fs.readFile(configPath(projectCwd), "utf8");
     const parsed = JSON.parse(raw) as Partial<ModelConfig>;
-    const model: ModelId = parsed.model === "deepseek-v4-pro" ? "deepseek-v4-pro" : "deepseek-v4-flash";
-    const thinking = parsed.thinking === true;
-    const effort: Effort = parsed.effort === "xhigh" ? "xhigh" : "high";
-    return { model, thinking, effort };
+    config = normalizeConfig({
+      model: parsed.model ?? DEFAULT_MODEL_CONFIG.model,
+      thinking: parsed.thinking === true,
+      effort: parsed.effort ?? "high",
+    });
   } catch {
-    return { ...DEFAULT_MODEL_CONFIG };
+    config = { ...DEFAULT_MODEL_CONFIG };
   }
+  await ensureDriver(config.model);
+  return config;
 }
 
 /** Persist the project's model config (best-effort; never throws). */

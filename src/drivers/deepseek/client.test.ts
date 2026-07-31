@@ -1,5 +1,5 @@
 /**
- * deepseek.test.ts — the streaming SSE reader (consumeStream).
+ * client.test.ts — the streaming SSE reader (consumeStream).
  *
  * Drives the parser with hand-built SSE byte streams, including frames split
  * across "network packets", so we know a fragmented tool call or a payload cut
@@ -7,7 +7,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { consumeStream, renderMessages, type StreamEvent, type ModelRequest } from "./deepseek.js";
+import { consumeStream, renderMessages, toStop } from "./client.js";
+import type { ModelRequest, StreamEvent } from "../types.js";
 
 // ── renderMessages: the cache-friendly request shape (universal) ───────────────
 test("renderMessages keeps a stable prefix and puts volatile context at the tail", () => {
@@ -145,4 +146,14 @@ test("malformed and keep-alive lines are ignored", async () => {
     ]),
   );
   assert.equal(result.content, "ok");
+});
+
+test("stop reasons map onto the shared set, so a truncated reply is detectable", () => {
+  assert.equal(toStop("stop"), "end");
+  assert.equal(toStop("tool_calls"), "end");
+  assert.equal(toStop("length"), "truncated");
+  assert.equal(toStop("content_filter"), "refused");
+  // An unfamiliar or absent reason must not be reported as a failure.
+  assert.equal(toStop(undefined), "end");
+  assert.equal(toStop("something_new"), "end");
 });
