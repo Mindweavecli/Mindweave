@@ -29,6 +29,18 @@ Claude joins DeepSeek as a second supported provider, and the driver system that
 
 **v1.1.1:** a dependency used only to unpack downloaded tooling had a known memory issue in old versions. It never affected anyone running MindWeave, and nothing was broken, but it's patched now so a fresh install won't flag it either.
 
+## v1.1.2, and what we're working on now
+
+Adding a second provider turned up something worth being open about: parts of MindWeave had quietly been written for one model rather than for all of them.
+
+The system prompt is shared by every provider, byte for byte, so anything written to correct one model's habits gets paid for by all of them. That was fine when there was only one provider, because "universal" and "that provider" meant the same thing. It stopped being fine the moment Claude landed. Two instructions turned out to be aimed at a single model, and one of them provably wasn't even working on the model it was written for, while still costing everyone else tokens and attention. Both are gone.
+
+The `/model` menu had the same problem in a more visible way. Its help text still read "DeepSeek V4 Flash / Pro" long after there were four models across two providers. It type-checked, every test passed, and it could never crash. It was just wrong, and sat in front of users every session.
+
+Neither of those could fail loudly, which is the interesting part. So there are now two guards in the test suite: one asserting the removed prompt lines stay removed, and one that scans the whole shared core for hardcoded model names. [`BOUNDARY.md`](BOUNDARY.md) writes down the rule they enforce, and every trap listed in it is one we actually hit rather than one we imagined.
+
+**This is ongoing.** We're still going through the codebase looking for places where one provider's assumptions leaked into shared ground. Expect more of these, and expect them to be written up plainly rather than folded into a changelog line. If you spot one, an issue is genuinely useful.
+
 ## Features
 
 - **Fully local & BYOK.** Bring your own model API key. No backend, no telemetry, no lock-in.
@@ -96,6 +108,7 @@ Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/driv
 - [x] DeepSeek driver
 - [x] **v1.0 — first public release**
 - [x] **v1.1: Anthropic (Claude) driver, providers loaded on demand, provider-aware setup, cut off replies caught**
+- [x] **v1.1.2: shared core made provider-neutral, with tests guarding it**
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …) — community-built
 - [ ] External tool-server support
 - [ ] Verified macOS / Linux support
