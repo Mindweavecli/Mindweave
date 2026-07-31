@@ -27,6 +27,8 @@ Claude joins DeepSeek as a second supported provider, and the driver system that
 - **Setup asks for the right key.** First launch, or switching to a provider you have not used yet, prompts for that provider's key specifically instead of assuming you're on DeepSeek.
 - **Cut off replies are caught, not hidden.** If a model hits its output limit or a provider declines a request, MindWeave now tells you plainly instead of quietly treating a half finished answer as complete.
 
+**v1.1.1:** a dependency used only to unpack downloaded tooling had a known memory issue in old versions. It never affected anyone running MindWeave, and nothing was broken, but it's patched now so a fresh install won't flag it either.
+
 ## Features
 
 - **Fully local & BYOK.** Bring your own model API key. No backend, no telemetry, no lock-in.
