@@ -34,28 +34,6 @@ Everything in this release came out of running MindWeave on a real project and w
 
 **Next up: MCP.** External tool servers are the big one, and they're what the next release is about. Everything else is smaller: shorter sessions don't write notes yet, so asking about a brief one falls back to reading its whole transcript.
 
-## v1.1 is out
-
-Claude joins DeepSeek as a second supported provider, and the driver system that makes that possible is now real rather than planned:
-
-- **Anthropic (Claude) support.** Run `claude-sonnet-5` or `claude-opus-5` right alongside DeepSeek, switching anytime with `/model`.
-- **Providers load on demand.** Only the driver for the model you picked ever loads. A DeepSeek user never pays the cost of Anthropic's SDK, and that stays true as more providers are added.
-- **Setup asks for the right key.** First launch, or switching to a provider you have not used yet, prompts for that provider's key specifically instead of assuming you're on DeepSeek.
-- **Cut off replies are caught, not hidden.** If a model hits its output limit or a provider declines a request, MindWeave now tells you plainly instead of quietly treating a half finished answer as complete.
-
-**v1.1.1:** a dependency used only to unpack downloaded tooling had a known memory issue in old versions. It never affected anyone running MindWeave, and nothing was broken, but it's patched now so a fresh install won't flag it either.
-
-## v1.1.2, and what we're working on now
-
-Adding a second provider turned up something worth being open about: parts of MindWeave had quietly been written for one model rather than for all of them.
-
-The system prompt is shared by every provider, byte for byte, so anything written to correct one model's habits gets paid for by all of them. That was fine when there was only one provider, because "universal" and "that provider" meant the same thing. It stopped being fine the moment Claude landed. Two instructions turned out to be aimed at a single model, and one of them provably wasn't even working on the model it was written for, while still costing everyone else tokens and attention. Both are gone.
-
-The `/model` menu had the same problem in a more visible way. Its help text still read "DeepSeek V4 Flash / Pro" long after there were four models across two providers. It type-checked, every test passed, and it could never crash. It was just wrong, and sat in front of users every session.
-
-Neither of those could fail loudly, which is the interesting part. So there are now two guards in the test suite: one asserting the removed prompt lines stay removed, and one that scans the whole shared core for hardcoded model names. [`BOUNDARY.md`](BOUNDARY.md) writes down the rule they enforce, and every trap listed in it is one we actually hit rather than one we imagined.
-
-**This is ongoing.** We're still going through the codebase looking for places where one provider's assumptions leaked into shared ground. Expect more of these, and expect them to be written up plainly rather than folded into a changelog line. If you spot one, an issue is genuinely useful.
 
 ## Features
 
