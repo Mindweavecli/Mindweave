@@ -20,7 +20,7 @@ It's built lean on purpose. Instead of burning your context budget on heavy scaf
 
 ## v1.3 is out: MCP
 
-MindWeave speaks the **Model Context Protocol**, so external tool servers — GitHub, Postgres, your company's internal API — become tools the agent can use directly.
+MindWeave speaks the **Model Context Protocol**, so external tool servers GitHub, Postgres, your company's internal API become tools the agent can use directly.
 
 **You don't start anything.** Add a server once and MindWeave spawns and manages it for you, every session, in the background:
 
