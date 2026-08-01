@@ -34,6 +34,27 @@ We are actively inviting engineers to step up as Driver Leads for specific model
 
 If you have hands-on experience optimizing for a specific backend, open an issue or drop a comment in Discussions to claim or improve a driver!
 
+### Who owns what right now
+
+| Provider | Driver Lead | Status |
+| --- | --- | --- |
+| DeepSeek | [@Nimannns](https://github.com/Nimannns) (maintainer) | Taken |
+| Anthropic (Claude) | Unclaimed | Shipped in v1.1, open to a lead |
+| OpenAI | Unclaimed | Wanted |
+| Qwen | Unclaimed | Wanted |
+| Ollama / local models | Unclaimed | Wanted |
+| Grok, MiniMax, OpenRouter, anything else | Unclaimed | Open |
+
+**Everything except DeepSeek is free to claim.** DeepSeek is the reference driver and the maintainer keeps it, because a multi-provider architecture needs one driver that is definitively correct to measure the others against. Anthropic already exists and works; it still has no dedicated lead, so it is available to anyone who wants to own it properly.
+
+To claim one, open an issue saying which provider and what you have actually run it against. Prior benchmarking or production experience with the backend matters far more than TypeScript polish; the wire code is the easy part.
+
+### What a new driver actually involves
+
+Less than people expect. A driver owns one provider's wire format, request shape, cache breakpoints, model list, prices, context window, and any parsing repairs that provider specifically needs. It does **not** own how the agent behaves. The system prompt is byte-identical whichever provider is selected, and that is not negotiable, because the moment a driver starts teaching the model how to work, every provider added afterwards makes the product worse instead of better.
+
+Start with [`src/drivers/README.md`](src/drivers/README.md) for the contract and the manifest/driver split, and read [BOUNDARY.md](BOUNDARY.md) before you write anything. `registry.test.ts` enforces the boundary and is the test your driver has to keep passing.
+
 ---
 
 ## How to Contribute
@@ -47,6 +68,12 @@ Before opening an issue, check the existing issues to avoid duplicates. When fil
 ### 2. Proposing Features or Architectural Changes
 * For minor tweaks or bug fixes: Feel free to submit a Pull Request directly.
 * For major feature additions or core orchestrator changes: Please start a thread in GitHub Discussions first so we can align on the approach.
+
+A word on scope, so nobody wastes an afternoon: **the core is deliberately close to finished.** The default answer to "should this be added" is no. What gets merged readily is a new driver, a reproduced bug with a failing test, or a demonstrated correctness gap. What does not is a feature nobody hit a wall without. A smaller core that does its job well beats a larger one that does more, and every line in the shared engine is paid for by every provider forever.
+
+### What we are working on next
+
+**MCP and external tool servers** are the focus of the next release. If that is where you want to help, say so in Discussions before writing code so the work does not collide.
 
 ### 3. Pull Request (PR) Process
 1. Fork the repository and create your branch from main:

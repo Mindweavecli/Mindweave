@@ -33,6 +33,7 @@ import { manifestForModel } from "../drivers/registry.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
 import { completePath } from "./pathComplete.js";
 import { hasApiKey, saveApiKey, globalEnvPath } from "./bootstrap.js";
+import { versionLabel } from "./version.js";
 import { PromptInput } from "./components/PromptInput.js";
 import { Picker } from "./components/Picker.js";
 import { BlockView } from "./components/BlockView.js";
@@ -993,7 +994,7 @@ export function App() {
       <Box flexDirection="column" paddingX={1}>
         <Box marginBottom={1}>
           <Text bold color="yellow">Mindweave</Text>
-          <Text dimColor> — terminal coding agent (v0.0.1)</Text>
+          <Text dimColor>{versionLabel()}</Text>
         </Box>
         <Text>Welcome to Mindweave — your terminal coding agent. Let's set you up, one time only.</Text>
         <Box marginTop={1}>
@@ -1189,7 +1190,7 @@ function Banner() {
   return (
     <Box marginBottom={1}>
       <Text bold color="yellow">Mindweave</Text>
-      <Text dimColor> — terminal coding agent (v0.0.1)</Text>
+      <Text dimColor>{versionLabel()}</Text>
     </Box>
   );
 }

@@ -139,10 +139,13 @@ export async function createSession(cwd: string = process.cwd()): Promise<Sessio
     loadModelConfig(cwd),
     listSessions(cwd),
   ]);
+  const id = randomUUID();
   const toolContext = freshToolContext(cwd, governance, [cwd]);
+  // So the session tools can exclude this conversation from "your past sessions".
+  toolContext.sessionId = id;
   await seedProjectMemoryRead(toolContext, projectMemory);
   return {
-    id: randomUUID(),
+    id,
     cwd,
     createdAt: Date.now(),
     transcript: [],
@@ -232,6 +235,7 @@ export async function resumeSession(
   const extra = (meta.extraRoots ?? []).filter((r) => existsSync(r));
   const roots = [cwd, ...extra];
   const toolContext = freshToolContext(cwd, governance, roots);
+  toolContext.sessionId = meta.id;
   await seedProjectMemoryRead(toolContext, projectMemory);
   return {
     id: meta.id,

@@ -165,6 +165,27 @@ into the prompt, and audits that only look at `prompt.ts` miss it entirely.
 Read model names from the registry (`allModels()`, `DEFAULT_MODEL_CONFIG`), never
 from a literal.
 
+**A prompt line that was true when written becomes a lie, and the model obeys it.**
+The prompt told the model *"You cannot see what was said in [your past sessions]
+from here… tell them `/continue` resumes a past session."* That was accurate when
+nothing could read a transcript. The sessions, the loaders, and the need all existed
+long before anyone revisited the sentence. Asked what happened last session, the
+model dutifully refused to look and paraphrased a project file instead. It read as a
+stupid model. It was an obedient one following a stale instruction. Prefer pointing
+at a tool (`call list_sessions`) over asserting an absence: a dead tool pointer fails
+loudly, a false negative claim never fails at all. Any sentence describing what the
+agent *cannot* do needs a test pinning it, so shipping the capability turns that test
+red — which is exactly how this one was finally caught.
+
+**Hardcoded UI strings are the same bug wearing different clothes.** The banner read
+`v0.0.1` for three releases while `package.json` said otherwise. `/model` described
+"DeepSeek V4 Flash / Pro" long after four models across two providers existed. Both
+type-check, neither can throw, every test passed. The pattern is always a literal
+standing in for something that has a real source of truth, in a place no assertion
+looks. Read from the source (`package.json`, `allModels()`, `DEFAULT_MODEL_CONFIG`),
+and guard it with a test that compares the two. `version.test.ts` and
+`providerNeutrality.test.ts` are those guards.
+
 ---
 
 ## Where things live

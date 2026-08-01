@@ -27,6 +27,7 @@ import { askUserTool } from "./askUser.js";
 import { addDirectory, linkWorkspace } from "./workspace.js";
 import { shellOutput, killShell, listShells } from "./shellTools.js";
 import { spawnSubagent } from "./subagent.js";
+import { listSessionsTool, readSessionTool } from "./sessionTools.js";
 
 export const TOOLS: Tool[] = [
   // Discovery (read-only)
@@ -45,6 +46,9 @@ export const TOOLS: Tool[] = [
   // Background shells (read-only: inspect long-running commands)
   shellOutput,
   listShells,
+  // Own history (read-only: what this agent did in this project before)
+  listSessionsTool,
+  readSessionTool,
   // Skills (read-only: loads a procedure into context on demand)
   useSkill,
   // Clarification (read-only: asks the user a focused question, changes nothing)

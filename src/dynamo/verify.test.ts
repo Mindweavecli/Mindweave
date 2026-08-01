@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isFileMutation, mutationNeedsVerification, looksLikeVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, normalizeErrorSignature } from "./verify.js";
+import { isFileMutation, mutationNeedsVerification, looksLikeVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, normalizeErrorSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine } from "./verify.js";
 
 test("file mutations are the edit/write tools", () => {
   assert.ok(isFileMutation("edit_file"));
@@ -196,4 +196,86 @@ test("normalizeErrorSignature: drops code-echo/caret/location noise and digits",
   );
   assert.match(sig, /cannot overwrite variable pid/);
   assert.doesNotMatch(sig, /char:|~|line:/);
+});
+
+// ---------------------------------------------------------------------------
+// The repeat-failure breaker's two tiers.
+//
+// These exist because of a real session: the model doubled a path (`cd` had moved
+// the shell), ran the same command three times, and the turn ended with nothing on
+// screen. The breaker had fired correctly and told nobody — not the user, and not
+// the model, which had no way to know it was repeating itself at all.
+// ---------------------------------------------------------------------------
+
+test("repeatFailureStep: does nothing below the limit", () => {
+  assert.equal(repeatFailureStep(1, 3, false), "none");
+  assert.equal(repeatFailureStep(2, 3, false), "none");
+});
+
+test("repeatFailureStep: the FIRST trip interrupts, it does not stop the turn", () => {
+  assert.equal(repeatFailureStep(3, 3, false), "nudge");
+});
+
+test("repeatFailureStep: stops only once the model has already been told", () => {
+  assert.equal(repeatFailureStep(3, 3, true), "stop");
+  assert.equal(repeatFailureStep(9, 3, true), "stop");
+});
+
+test("repeatFailureStep: no streak can ever stop a turn without a nudge first", () => {
+  for (let streak = 0; streak < 25; streak++) {
+    assert.notEqual(
+      repeatFailureStep(streak, 3, false),
+      "stop",
+      `streak ${streak} stopped the turn without ever telling the model it was looping`,
+    );
+  }
+});
+
+test("repeatFailureNudge: states the count, the action, the error, and the consequence", () => {
+  const msg = repeatFailureNudge({
+    attempts: 3,
+    action: "python code-blue/backend/manage.py check",
+    error: "can't open file 'manage.py': No such file or directory",
+    cwd: "D:/Protocol Axiom/code-blue/backend",
+  });
+  assert.match(msg, /3 times/);
+  assert.match(msg, /manage\.py check/);
+  assert.match(msg, /No such file or directory/);
+  assert.match(msg, /will end the turn/);
+  // The working directory is the whole point: without it the model cannot see why
+  // its path doubled, which is the failure this nudge was written for.
+  assert.match(msg, /code-blue\/backend/);
+});
+
+test("repeatFailureNudge: mentions the working directory only when the shell has moved", () => {
+  const msg = repeatFailureNudge({ attempts: 3, action: "npm test", error: "1 failing" });
+  assert.doesNotMatch(msg, /working directory|shell is currently/i);
+});
+
+test("failedActionLabel: a shell failure shows the command that was actually run", () => {
+  assert.equal(
+    failedActionLabel("run_command", { command: "  python manage.py check  " }),
+    "python manage.py check",
+  );
+});
+
+test("failedActionLabel: other tools show what they acted on, or just their name", () => {
+  assert.equal(failedActionLabel("edit_file", { path: "src/App.css" }), "edit_file src/App.css");
+  assert.equal(failedActionLabel("read_file", { file_path: "a.ts" }), "read_file a.ts");
+  assert.equal(failedActionLabel("todo_write", {}), "todo_write");
+});
+
+test("failedActionLabel: a runaway command is clipped, not pasted whole", () => {
+  const label = failedActionLabel("run_command", { command: "echo " + "x".repeat(500) });
+  assert.ok(label.length <= 160, `label was ${label.length} chars`);
+  assert.ok(label.endsWith("…"));
+});
+
+test("firstErrorLine: skips PowerShell's code-echo and caret decoration", () => {
+  const line = firstErrorLine("\n+ python manage.py check\n~~~~~\nCannot find path 'manage.py'.");
+  assert.equal(line, "Cannot find path 'manage.py'.");
+});
+
+test("firstErrorLine: falls back rather than returning nothing to show", () => {
+  assert.equal(firstErrorLine(""), "the same error");
 });

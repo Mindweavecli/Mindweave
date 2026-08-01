@@ -203,6 +203,86 @@ export function normalizeErrorSignature(output: string): string {
     .slice(0, 240);
 }
 
+/**
+ * What the breaker should do at a given streak length. Two tiers, deliberately:
+ *
+ * Stopping the turn the moment a streak trips is the wrong reflex. The model has
+ * no idea it repeated itself — nothing in the conversation says so — so a hard stop
+ * punishes it for a fact it was never told. Worse, it removes the one thing that
+ * would actually fix the situation: a chance to look at why.
+ *
+ * So the first trip INTERRUPTS: the loop injects the fact (same thing, N times, same
+ * error, here's where your shell actually is) and continues. Only if the model repeats
+ * it AGAIN after being told does the turn stop. That second tier is what keeps this a
+ * real backstop rather than an endless nudge, and it costs one model round-trip.
+ */
+export type RepeatFailureStep = "none" | "nudge" | "stop";
+
+export function repeatFailureStep(streak: number, limit: number, nudged: boolean): RepeatFailureStep {
+  if (streak < limit) return "none";
+  return nudged ? "stop" : "nudge";
+}
+
+/**
+ * The first line of an error worth showing a human: skips blanks and PowerShell's
+ * code-echo/caret decoration, and clips so one runaway line can't fill the screen.
+ */
+export function firstErrorLine(output: string, max = 200): string {
+  const line =
+    output
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith("+") && !/^~+$/.test(l)) ?? "the same error";
+  return line.length > max ? line.slice(0, max - 3) + "…" : line;
+}
+
+/**
+ * A one-line label for the thing that kept failing. For a shell command that's the
+ * command itself (the actual repeated text); for anything else it's the tool plus
+ * whichever argument identifies what it acted on.
+ */
+export function failedActionLabel(name: string, args: Record<string, unknown>): string {
+  const command = typeof args.command === "string" ? args.command.trim() : "";
+  if (command) return command.length > 160 ? command.slice(0, 157) + "…" : command;
+  const target = ["path", "file_path", "file", "pattern", "query"]
+    .map((k) => args[k])
+    .find((v) => typeof v === "string" && v) as string | undefined;
+  return target ? `${name} ${target}` : name;
+}
+
+/**
+ * The interrupt injected on the first trip of the breaker.
+ *
+ * Every sentence here is a FACT the model cannot otherwise see: how many times it
+ * repeated itself, what it repeated, what the error was, where its shell actually is,
+ * and what the harness will do next. That last one matters — the model can only weigh
+ * "retry once more" against a stop if it knows the stop is coming.
+ *
+ * `cwd` is included only when the shell has moved off the project root, which is the
+ * failure this was written for: `cd` persists within a turn, so a later relative path
+ * silently resolves from somewhere else and the model has no way to notice.
+ */
+export function repeatFailureNudge(opts: {
+  attempts: number;
+  action: string;
+  error: string;
+  cwd?: string;
+}): string {
+  const where = opts.cwd
+    ? `Your shell is currently in ${opts.cwd}, not the project root. Relative paths resolve from there, ` +
+      `so a path that looks right from the root will not be.\n\n`
+    : "";
+  return (
+    `You have now run this ${opts.attempts} times and gotten the same error every time:\n\n` +
+    `    ${opts.action}\n` +
+    `    ${opts.error}\n\n` +
+    where +
+    `Running it again unchanged will end the turn. Find out why it fails before you act again: ` +
+    `check the path or file it names, confirm the state you are actually in, or take a different ` +
+    `route to the same goal. (This fires once per failure loop.)`
+  );
+}
+
 /** The one-shot nudge injected when files changed but nothing was checked. */
 export const VERIFY_NUDGE =
   "You edited files this turn but never ran a check. Before finishing, verify what you changed actually " +

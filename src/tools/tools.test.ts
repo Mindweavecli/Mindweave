@@ -289,6 +289,27 @@ test("run_command persists cwd across calls (cd carries over)", async () => {
   assert.match(ctx.cwd.split("\\").join("/"), /\/sub$/);
 });
 
+// The model cannot see ctx.cwd. If a `cd` moves the shell and the output doesn't say
+// so, the next relative path silently resolves from somewhere else — which is how a
+// doubled path (a/b/a/b/file) gets built and then read as "the file is missing".
+test("run_command TELLS the model when a cd moved the shell", async () => {
+  const ctx = freshCtx();
+  // A real session always pins roots at creation (session.ts), which is what keeps the
+  // anchor still while cwd moves. Without it here the anchor would follow the cd and
+  // every location would render as ".".
+  ctx.roots = [ctx.cwd];
+  await fs.mkdir(join(ctx.cwd, "sub"), { recursive: true });
+  const r = await runCommand.execute({ command: "cd sub" }, ctx);
+  assert.match(r.output, /Working directory is now sub/);
+  assert.match(r.output, /rest of this turn/);
+});
+
+test("run_command says nothing about the directory when it did not move", async () => {
+  const ctx = freshCtx();
+  const r = await runCommand.execute({ command: "echo hello" }, ctx);
+  assert.doesNotMatch(r.output, /Working directory is now/);
+});
+
 test("run_command refuses a catastrophic command", async () => {
   const ctx = freshCtx();
   const r = await runCommand.execute({ command: "rm -rf /" }, ctx);

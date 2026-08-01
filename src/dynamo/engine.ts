@@ -16,7 +16,7 @@
 import { activeDriver, ensureDriver } from "../drivers/registry.js";
 import type { ChatMessage, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
-import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, VERIFY_NUDGE } from "./verify.js";
+import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, VERIFY_NUDGE } from "./verify.js";
 import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, interpretGuardChoice } from "./guard.js";
 import { findTool, toolSchemas } from "../tools/registry.js";
 import { commandShellLabel } from "../tools/runCommand.js";
@@ -122,17 +122,16 @@ The project provides this context in its MINDWEAVE.md — treat it as background
 ${projectMemory}
 </project_memory>`;
   }
-  // Its own past work in this project. The transcripts are on disk but nothing
-  // loads them, so without this line the model believes it has never been here —
-  // and, asked what happened last time, will say so while a full transcript of
-  // that exact work sits unread. Deliberately the COUNT and not the content:
-  // resuming is the user's decision, and replaying old sessions into every new
-  // one would be ruinously expensive.
+  // Its own past work in this project. The COUNT goes in the prompt (so the model
+  // knows the history exists without being told every turn what is in it); the
+  // CONTENT is pulled on demand with list_sessions / read_session. Injecting the
+  // sessions themselves would be ruinous — this way an ordinary turn pays nothing
+  // and a question about past work gets a real answer instead of a deflection.
   if (priorSessions > 0) {
     const s = priorSessions === 1 ? "" : "s";
     prompt += `
 
-You have worked in this project before: ${priorSessions} earlier session${s} of yours are saved. You cannot see what was said in them from here. If the user refers to previous work, or you need that history, tell them it exists and that \`/continue\` resumes a past session — do not go looking for it elsewhere, and never present another tool's saved conversations as your own.`;
+You have worked in this project before: ${priorSessions} earlier session${s} of yours are saved, and you can read them. When the user refers to earlier work — "last session", "what did we do", "the bug we fixed" — call \`list_sessions\`, then \`read_session\` for the one they mean, and answer from what you find. Do not say you cannot see your past sessions, and do not guess from the project files instead. \`/continue\` is for the user to RESUME a session; it is not a substitute for you looking. Never present another tool's saved conversations as your own.`;
   }
 
   if (memoryDir) {
@@ -568,9 +567,12 @@ export async function respond(session: Session, options: RespondOptions = {}): P
   // stop on the prose nudge alone). Any step that does real work resets it to 0.
   let bgPollStreak = 0;
   // Repeat-failure breaker: consecutive steps that failed the SAME way (identical error
-  // signature). A weaker model can grind the same broken command for dozens of steps;
-  // once the streak crosses REPEAT_FAIL_LIMIT we stop losslessly and surface the error.
+  // signature). A model can grind the same broken command for dozens of steps; once the
+  // streak crosses REPEAT_FAIL_LIMIT we interrupt with the fact that it is repeating
+  // itself, and only stop the turn if it does it again afterwards. `repeatFailNudged`
+  // resets whenever the failure changes, so each distinct loop gets one interrupt.
   let repeatFailStreak = 0;
+  let repeatFailNudged = false;
   let lastFailSig: string | null = null;
   let lastFailOutput = "";
 
@@ -592,7 +594,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // Stop before another (billable) call if a cost/time ceiling is hit — pause
     // losslessly, exactly like the step budget, so the user can raise it and resume.
     const limitReason = taskLimitReason(summarizeTask(usages, session.modelConfig.model), Date.now() - startedAt, limits);
-    if (limitReason) return pauseTask(session, `hit the ${limitReason}`);
+    if (limitReason) return pauseTask(session, options, `hit the ${limitReason}`);
     await maybeCompact(session, options);
 
     // The live working set: current contents of the files being worked on, rebuilt
@@ -622,7 +624,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
       const note = stopReasonNote(result.stop);
       if (content.trim()) session.transcript.push({ role: "assistant", content });
       await options.persist?.();
-      return pauseTask(session, note);
+      return pauseTask(session, options, note);
     }
 
     // No tool calls → the model is done. Record the reply.
@@ -783,7 +785,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     completedAList = reScope.completed;
     // Remember, for the NEXT turn's boundary sweep, that a task just finished here.
     session.taskJustCompleted = reScope.completed;
-    if (reScope.pause) return pauseReScope(session);
+    if (reScope.pause) return pauseReScope(session, options);
 
     // Background-poll guard. A still-running shell's completion is pushed to the model
     // automatically, so polling it in a loop is pure waste and reads as spam ("still
@@ -793,28 +795,54 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // finishes, backgroundEventNotes wakes the model to report it.
     if (isBackgroundPollStep(results.map((r) => ({ name: r.call.name, summary: r.summary })))) {
       bgPollStreak++;
-      if (bgPollStreak > BG_POLL_ALLOWANCE) return pauseForBackgroundPoll(session);
+      if (bgPollStreak > BG_POLL_ALLOWANCE) return pauseForBackgroundPoll(session, options);
     } else {
       bgPollStreak = 0;
     }
 
     // Repeat-failure breaker. If this step failed exactly the way the last one(s) did —
     // same tools, same error — the model is stuck grinding a broken command instead of
-    // changing course. Count consecutive identical failures; once past the limit, stop
-    // and hand the real error back to the user rather than burning steps (and context)
-    // on a doomed retry loop. Keyed on the error MESSAGE, so a run of near-identical
-    // commands that all fail the same way still trips it.
+    // changing course. Keyed on the error MESSAGE, so a run of near-identical commands
+    // that all fail the same way still trips it.
+    //
+    // The first trip does NOT end the turn. Nothing in the conversation tells the model
+    // it is repeating itself, so ending there would kill it for something it could not
+    // see. Instead we inject that fact (with the shell's real cwd, the usual culprit)
+    // and let it diagnose. Repeat it after being told and the turn stops for real.
     const failSig = stepFailureSignature(
       results.map((r) => ({ name: r.call.name, output: r.output, isError: !!r.isError })),
     );
     if (failSig) {
-      repeatFailStreak = failSig === lastFailSig ? repeatFailStreak + 1 : 1;
+      if (failSig === lastFailSig) {
+        repeatFailStreak++;
+      } else {
+        // A different failure is a different loop: it gets its own interrupt.
+        repeatFailStreak = 1;
+        repeatFailNudged = false;
+      }
       lastFailSig = failSig;
-      lastFailOutput = results.find((r) => r.isError)?.output ?? "";
-      if (repeatFailStreak >= REPEAT_FAIL_LIMIT) return pauseForRepeatedFailure(session, lastFailOutput);
+      const failed = results.find((r) => r.isError);
+      lastFailOutput = failed?.output ?? "";
+      const action = repeatFailureStep(repeatFailStreak, REPEAT_FAIL_LIMIT, repeatFailNudged);
+      if (action === "stop") return pauseForRepeatedFailure(session, options, lastFailOutput);
+      if (action === "nudge") {
+        repeatFailNudged = true;
+        session.transcript.push({
+          role: "user",
+          content: repeatFailureNudge({
+            attempts: repeatFailStreak,
+            action: failed ? failedActionLabel(failed.call.name, parseArgs(failed.call.arguments)) : "the same step",
+            error: firstErrorLine(lastFailOutput),
+            // Only when `cd` has actually moved us — otherwise it's noise.
+            cwd: session.toolContext.cwd !== session.cwd ? session.toolContext.cwd : undefined,
+          }),
+        });
+        await options.persist?.();
+      }
     } else {
       repeatFailStreak = 0;
       lastFailSig = null;
+      repeatFailNudged = false;
     }
   }
 
@@ -823,7 +851,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
   // reads as "done" when it isn't. Pause cleanly instead: the transcript, task
   // list, and working set are all intact, so telling Mindweave to continue resumes
   // exactly here with nothing lost, and the user stays in control of the spend.
-  return pauseTask(session, `reached the step budget of ${stepLimit} tool steps in one turn`);
+  return pauseTask(session, options, `reached the step budget of ${stepLimit} tool steps in one turn`);
   }
 }
 
@@ -839,56 +867,73 @@ function lastUserText(session: Session): string {
   return "(edits)";
 }
 
+/**
+ * End the turn with a message, recording it AND putting it on the wire.
+ *
+ * The emit is the point. A normal reply reaches the screen as `text` events while
+ * the model streams it; a pause message is composed here, after streaming, so it
+ * has no such path of its own. Without this the transcript and the next model turn
+ * both get the explanation while the user gets a turn that just ends, blank — which
+ * is exactly how a tripped guard came to look like a crash.
+ *
+ * respond()'s return value is deliberately not what the UI renders: sub-agents call
+ * respond() directly and use the return as their report, with no UI attached at all.
+ */
+function endTurnWith(session: Session, options: RespondOptions, msg: string): string {
+  session.transcript.push({ role: "assistant", content: msg });
+  options.onEvent?.({ type: "text", delta: msg });
+  return msg;
+}
+
 /** Lossless hand-back when the model finishes its task list and then starts a new
  *  one in the same turn (the re-scope guard) — a natural checkpoint to let the user
  *  steer instead of the model taking on scope it wasn't asked for. */
-function pauseReScope(session: Session): string {
-  const msg =
+function pauseReScope(session: Session, options: RespondOptions): string {
+  return endTurnWith(
+    session,
+    options,
     "(I've finished the task list for what you asked. I have ideas for taking it " +
-    "further, but I've stopped here so you can steer — rather than piling on new scope " +
-    'on my own. Tell me which direction you want, or say "keep going" to continue.)';
-  session.transcript.push({ role: "assistant", content: msg });
-  return msg;
+      "further, but I've stopped here so you can steer — rather than piling on new scope " +
+      'on my own. Tell me which direction you want, or say "keep going" to continue.)',
+  );
 }
 
 /** Lossless stop when the model is stuck polling a still-running background shell.
  *  The shell's completion is pushed to the model automatically, so there's nothing
  *  to do but wait — end the turn cleanly instead of looping "still running" checks.
  *  Deliberately worded as a status line to the user, not a "paused" apology. */
-function pauseForBackgroundPoll(session: Session): string {
-  const msg =
+function pauseForBackgroundPoll(session: Session, options: RespondOptions): string {
+  return endTurnWith(
+    session,
+    options,
     "It's still running in the background. I'll stop checking and let you know as soon " +
-    "as it finishes — no need to keep watching.";
-  session.transcript.push({ role: "assistant", content: msg });
-  return msg;
+      "as it finishes — no need to keep watching.",
+  );
 }
 
-/** Lossless stop when the model repeats the same failing step over and over. Rather than
- *  grind a broken command for dozens of steps, we surface the actual error and hand the
- *  wheel back — the model (or user) can then change approach instead of retrying blindly. */
-function pauseForRepeatedFailure(session: Session, errorOutput: string): string {
-  const firstLine =
-    errorOutput
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .find((l) => l && !l.startsWith("+") && !/^~+$/.test(l)) ?? "the same error";
-  const clipped = firstLine.length > 200 ? firstLine.slice(0, 197) + "…" : firstLine;
-  const msg =
+/** Lossless stop when the model repeats the same failing step even AFTER being told it is
+ *  looping (the breaker's second tier). By this point it has had the error, the repeat
+ *  count, and its real working directory, and it still hasn't moved — so hand the wheel
+ *  to the user rather than spend more steps on it. */
+function pauseForRepeatedFailure(session: Session, options: RespondOptions, errorOutput: string): string {
+  return endTurnWith(
+    session,
+    options,
     `I've hit the same failure several times in a row and I'm not making progress, so I've ` +
-    `stopped rather than retry the same thing again. The error was:\n\n${clipped}\n\n` +
-    `Tell me how you'd like to proceed, or I can try a different approach.`;
-  session.transcript.push({ role: "assistant", content: msg });
-  return msg;
+      `stopped rather than retry the same thing again. The error was:\n\n${firstErrorLine(errorOutput)}\n\n` +
+      `Tell me how you'd like to proceed, or I can try a different approach.`,
+  );
 }
 
 /** Record and return a clean, lossless pause reply (well-formed transcript) when a
  *  guard trips — step budget or a cost/time ceiling. Saying "continue" resumes. */
-function pauseTask(session: Session, reason: string): string {
-  const pause =
+function pauseTask(session: Session, options: RespondOptions, reason: string): string {
+  return endTurnWith(
+    session,
+    options,
     `(Paused — ${reason}. The task isn't finished, but nothing is lost: your progress, ` +
-    `edits, and task list are saved. Say "continue" to pick up exactly where I left off.)`;
-  session.transcript.push({ role: "assistant", content: pause });
-  return pause;
+      `edits, and task list are saved. Say "continue" to pick up exactly where I left off.)`,
+  );
 }
 
 /**

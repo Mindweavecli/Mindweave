@@ -18,6 +18,22 @@ MindWeave is a coding agent that lives in your terminal and works directly insid
 
 It's built lean on purpose. Instead of burning your context budget on heavy scaffolding, MindWeave keeps prompts thin and leaves the model room to actually reason about your code.
 
+## v1.2 is out: the agent knows its own work
+
+Everything in this release came out of running MindWeave on a real project and watching it fail. Every item below is a bug we reproduced, not a feature someone imagined.
+
+**It can read its own past sessions.** Ask "what did we do last session" and it answers, because it now has `list_sessions` and `read_session` and will go and look. Previously it could only tell you a number and suggest you run `/continue` yourself. The transcripts had been saved on disk the whole time with nothing to read them, and the system prompt made it worse by stating outright that it couldn't see them. It was obeying an instruction that had quietly become false. Both tools are read-only, and `read_session` returns a session's own running notes rather than the raw log, so asking about old work doesn't cost a fortune.
+
+**A repeated failure interrupts instead of killing the turn.** MindWeave has always stopped an agent that runs the same failing command over and over. The problem was that it stopped it silently, on the third try, without ever telling the model it was repeating itself. So the model got cut off for a fact it had no way to see. Now the first trip injects that fact, including the shell's real working directory, and lets it diagnose. Only a repeat after being told ends the turn.
+
+**When a turn stops early, you find out why.** Every one of those safety stops built a clear explanation, recorded it, and then dropped it. The message reached the model and the transcript, never the screen. A tripped guard was indistinguishable from a crash. All of them now print.
+
+**`cd` no longer poisons the next command.** The working directory persists between commands within a turn, which is useful and was invisible: nothing told the model it had moved, so its next relative path resolved from the wrong place and built a doubled path that failed. Commands that move the shell now say so.
+
+**The version in the banner is the real one.** It read `v0.0.1` for three releases while the package said otherwise. Read from `package.json` now, with a test comparing the two.
+
+**Next up: MCP.** External tool servers are the big one, and they're what the next release is about. Everything else is smaller: shorter sessions don't write notes yet, so asking about a brief one falls back to reading its whole transcript.
+
 ## v1.1 is out
 
 Claude joins DeepSeek as a second supported provider, and the driver system that makes that possible is now real rather than planned:
@@ -47,7 +63,7 @@ Neither of those could fail loudly, which is the interesting part. So there are 
 - **Model-adaptive drivers.** Each model family gets its own driver so it runs at its best — without bloating the core. Only the driver you're using is ever loaded.
 - **Deterministic code intelligence.** A background lane indexes your repo with tree-sitter and language servers (no tokens, no cost) so the agent understands your codebase, not just the open file.
 - **Real tools.** File read/edit, multi-file edits, ripgrep search, shell with background jobs, sub-agents, and diagnostics — with read-before-edit safety and an undo net.
-- **Session memory.** Long sessions stay sharp: automatic compaction plus a continuously-maintained state summary that survives it.
+- **Session memory.** Long sessions stay sharp: automatic compaction plus a continuously-maintained state summary that survives it. The agent can also read its own earlier sessions in a project, so "what did we do last time" gets a real answer.
 - **Per-project governor.** Give a project standing rules, reusable skills, and forbidden paths/commands that the agent must respect.
 - **Interaction modes.** Lightning (auto), Architect (plan-only, read-only), cycled with `shift-tab`.
 
@@ -109,8 +125,9 @@ Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/driv
 - [x] **v1.0 — first public release**
 - [x] **v1.1: Anthropic (Claude) driver, providers loaded on demand, provider-aware setup, cut off replies caught**
 - [x] **v1.1.2: shared core made provider-neutral, with tests guarding it**
+- [x] **v1.2: reads its own past sessions, failure loops interrupt instead of stopping dead, every early stop explains itself**
+- [ ] **v1.3: MCP / external tool servers** — the next release
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …) — community-built
-- [ ] External tool-server support
 - [ ] Verified macOS / Linux support
 
 ## Contributing

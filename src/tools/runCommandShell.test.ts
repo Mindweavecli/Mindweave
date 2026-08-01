@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCommand } from "./runCommand.js";
+import { runCommand, cwdChangeNote } from "./runCommand.js";
 import { BackgroundShells } from "./backgroundShells.js";
 import type { ToolContext } from "./types.js";
 
@@ -126,4 +126,29 @@ test("the ACTUAL bug shape: `Start-Process -Wait` on a detached process still ba
   mgr.dispose();
   assert.match(r.output, /background as shell #\d+/i, `expected backgrounded, got: ${r.output.slice(0, 120)}`);
   assert.ok(elapsed < 8000, `must not freeze on Start-Process -Wait (took ${elapsed}ms)`);
+});
+
+// ── the cwd-change note (pure) ──────────────────────────────────────────────
+// `cd` persisting within a turn is invisible to the model unless the tool output
+// says so. These pin the wording it depends on, and pin that ordinary commands
+// stay silent — a note on every command would be noise on every command.
+
+test("cwdChangeNote: silent when the command did not move the shell", () => {
+  assert.equal(cwdChangeNote("/proj", "/proj", "."), null);
+});
+
+test("cwdChangeNote: names the new location and how long it lasts", () => {
+  const note = cwdChangeNote("/proj", "/proj/backend", "backend");
+  assert.ok(note);
+  assert.match(note, /now backend/);
+  assert.match(note, /rest of this turn/);
+  // It has to say what this actually breaks, or the model reads it as trivia.
+  assert.match(note, /resolve from backend, not from the project root/);
+});
+
+test("cwdChangeNote: coming back to the root reads as the root, not '.'", () => {
+  const note = cwdChangeNote("/proj/backend", "/proj", ".");
+  assert.ok(note);
+  assert.match(note, /now the project root/);
+  assert.doesNotMatch(note, /now \./);
 });

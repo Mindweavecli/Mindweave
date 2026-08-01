@@ -50,9 +50,11 @@ test("forbidden paths still stay in the cached system prefix", () => {
 
 // ── Its own past sessions ─────────────────────────────────────────────────────
 //
-// Transcripts are saved but nothing loads them, so unless the prompt says so the
-// model believes it has never worked here — and says so to the user while a full
-// transcript of that exact work sits unread on disk.
+// Transcripts are saved, and list_sessions / read_session can read them. The prompt
+// carries the COUNT only — enough for the model to know the history exists — and
+// points it at the tools for the content. It used to say the opposite ("you cannot
+// see what was said"), which was true when nothing could read them and became a
+// lie the moment the tools shipped; the model dutifully repeated it to the user.
 
 test("with no prior sessions, nothing is claimed", () => {
   const sys = staticSystemPrompt("", "", "", "", gov({}), "", 0);
@@ -72,12 +74,20 @@ test("a single prior session reads as singular, not '1 sessions'", () => {
   assert.ok(!/1 earlier sessions/.test(sys));
 });
 
-test("it is told it cannot read those sessions from here, and not to substitute another tool's", () => {
-  // The failure this guards against: going hunting through a different agent's
-  // saved conversations and presenting them as its own recollection.
+test("it is pointed at the tools that read those sessions, not told it is blind", () => {
   const sys = staticSystemPrompt("", "", "", "", gov({}), "", 3);
-  assert.match(sys, /cannot see what was said/);
-  assert.match(sys, /never present another tool's saved conversations as your own/);
+  assert.match(sys, /list_sessions/);
+  assert.match(sys, /read_session/);
+  // The exact deflection the user hit: claiming no visibility, then paraphrasing
+  // project files instead of looking. Both are now explicitly ruled out.
+  assert.doesNotMatch(sys, /cannot see what was said/);
+  assert.match(sys, /Do not say you cannot see your past sessions/);
+  assert.match(sys, /do not guess from the project files/);
+});
+
+test("another tool's saved conversations are still never ours to claim", () => {
+  const sys = staticSystemPrompt("", "", "", "", gov({}), "", 3);
+  assert.match(sys, /never present another tool's saved conversations as your own/i);
 });
 
 // ── The shared prompt stays provider-neutral ──────────────────────────────────

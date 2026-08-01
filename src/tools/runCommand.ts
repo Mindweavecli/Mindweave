@@ -192,6 +192,9 @@ async function runShell(
 ): Promise<ToolResult> {
   // A unique temp file the wrapped command writes its final cwd into.
   const cwdFile = join(tmpdir(), `mindweave-cwd-${randomBytes(6).toString("hex")}.txt`);
+  // Where we stood before the command ran — applyCwd may move ctx.cwd, and the model
+  // needs telling when it does (see cwdChangeNote).
+  const cwdBefore = ctx.cwd;
 
   const { bin, args, wrapped, tempFile } = buildInvocation(command, cwdFile, shell);
   const child = spawn(bin, [...args, wrapped], {
@@ -289,7 +292,7 @@ async function runShell(
       detachAbort();
       await applyCwd(cwdFile, ctx);
       if (tempFile) await fs.rm(tempFile, { force: true }).catch(() => {});
-      resolve(format(command, ctx, output, truncated, timedOut, exitCode, timeoutMs, shell));
+      resolve(format(command, ctx, output, truncated, timedOut, exitCode, timeoutMs, shell, cwdBefore));
     };
 
     child.on("error", (error) => {
@@ -368,6 +371,29 @@ function buildInvocation(
   return { bin: "/bin/sh", args: ["-c"], wrapped };
 }
 
+/**
+ * The line appended to a command's output when it moved the shell (pure).
+ *
+ * `cd` persisting across calls within a turn is a real convenience, but it is also
+ * invisible: the model composes the next command's relative paths from the project
+ * root, because nothing ever told it the floor moved. That produces a doubled path
+ * (`code-blue/backend/code-blue/backend/manage.py`), which fails, and looks to the
+ * model like the file is missing rather than like it is standing somewhere else.
+ *
+ * So we say it, once, exactly when it happens. `shown` is the new location relative
+ * to the project root — the same form paths are addressed in everywhere else.
+ * Returns null when the command did not move, which is nearly every command, so
+ * ordinary output is untouched.
+ */
+export function cwdChangeNote(before: string, after: string, shown: string): string | null {
+  if (before === after) return null;
+  const where = shown === "." ? "the project root" : shown;
+  return (
+    `[Working directory is now ${where}. It stays there for the rest of this turn, so ` +
+    `relative paths in your next command resolve from ${where}, not from the project root.]`
+  );
+}
+
 /** Read the cwd the command ended in and adopt it (if it still exists). */
 async function applyCwd(cwdFile: string, ctx: ToolContext): Promise<void> {
   try {
@@ -394,6 +420,7 @@ function format(
   exitCode: number | null,
   timeoutMs: number,
   shell: Shell,
+  cwdBefore: string,
 ): ToolResult {
   const body = output.trim();
   const parts: string[] = [];
@@ -423,6 +450,10 @@ function format(
   }
 
   const shown = relativize(ctx, ctx.cwd);
+  // Did this command move the shell? If so the model must hear it here, in the tool
+  // OUTPUT — the summary line below is display-only and never reaches the model.
+  const moved = cwdChangeNote(cwdBefore, ctx.cwd, shown);
+  if (moved) parts.push(moved);
   const status = timedOut ? "timed out" : exitCode === 0 ? "ok" : `exit ${exitCode}`;
   return {
     output: parts.join("\n"),

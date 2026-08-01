@@ -98,6 +98,12 @@ export interface ToolContext {
    * fixed session root (cwd may move within it via `cd`).
    */
   roots?: string[];
+  /**
+   * The live session's id. Used by the session tools to exclude the CURRENT session
+   * from "your past sessions" — listing the conversation you are already in as
+   * history is confusing and, on resume, circular.
+   */
+  sessionId?: string;
   /** Read ledger: resolved absolute path → its state when last read/written. */
   reads: Map<string, ReadRecord>;
   /**
