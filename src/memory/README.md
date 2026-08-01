@@ -27,15 +27,19 @@ of the filesystem and just operates on the transcript it's handed.
 A long transcript dilutes the model's focus (and costs tokens every turn). Two
 layers, cheapest first, run by the engine's `maybeCompact`:
 
-1. **microcompact** (`~45K` tokens, lossless, no model call): clear the *bodies*
-   of old tool results, keep the last `KEEP_LAST_N` verbatim and never the most
-   recent round. A cleared result leaves a stub — the model can re-read.
-2. **autocompact** (`~90K` tokens, one model call): replace the old prefix with a
-   9-section structured summary, keep the last N turns, then **re-read the
+1. **microcompact** (30% of the sharp window, lossless, no model call): clear the
+   *bodies* of old tool results, keep the last `KEEP_LAST_N` verbatim and never the
+   most recent round. A cleared result leaves a stub — the model can re-read.
+2. **autocompact** (sharp window − 33K, one model call): replace the old prefix with
+   a 9-section structured summary, keep the last N turns, then **re-read the
    working-set files** (restoration in the engine) so the model keeps the actual
-   code, not just a description. Thresholds are env-tunable
-   (`MINDWEAVE_MICROCOMPACT_TOKENS` / `MINDWEAVE_AUTOCOMPACT_TOKENS`), tuned to DeepSeek's
-   ~128K sharp window rather than its 1M storage limit.
+   code, not just a description.
+
+Both bars are **derived from the driver's sharp window** (`dynamo/contextWindow.ts`),
+so they move with the model instead of being frozen in this module. On DeepSeek that
+is 256K for V4-Pro and 192K for V4-Flash — where multi-needle retrieval still holds,
+not the 1M storage cap. Env overrides remain
+(`MINDWEAVE_MICROCOMPACT_TOKENS` / `MINDWEAVE_AUTOCOMPACT_TOKENS`).
 
 Also reachable manually: `/compact` (force a summary now) and `/continue` (resume
 the last session), handled in the CLI.

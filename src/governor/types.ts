@@ -75,6 +75,15 @@ export interface ForbiddenConfig {
    * Optional so path-only configs stay valid; treated as [] when absent.
    */
   commands?: string[];
+  /**
+   * Forbidden MCP TOOL names (`mcp__<server>__<tool>`), the third prohibition half:
+   * paths are files, commands are shell actions, these are external integrations. An
+   * MCP tool is third-party code the user pointed at, so being able to say "never that
+   * one" without dropping the whole server is the difference between using a server and
+   * not. Enforced by exclusion from the catalog, so a forbidden tool is never
+   * advertised, searched, activated or dispatched. Optional; treated as [] when absent.
+   */
+  mcpTools?: string[];
   root: string;
 }
 

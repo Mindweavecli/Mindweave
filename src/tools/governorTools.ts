@@ -10,7 +10,8 @@
  * user's call relayed by the model; these tools only record it.
  */
 import type { Tool, ToolResult } from "./types.js";
-import { writeRule, appendForbidden, appendForbiddenCommand, deriveRuleName, writeSkill } from "../governor/write.js";
+import { isMcpToolName } from "../mcp/catalog.js";
+import { writeRule, appendForbidden, appendForbiddenCommand, appendForbiddenMcpTool, deriveRuleName, writeSkill } from "../governor/write.js";
 import { parseGlobs } from "../governor/rules.js";
 
 /** The project root for state files: the fixed session root, carried on the
@@ -155,6 +156,56 @@ export const forbidCommand: Tool = {
         ? `Forbidden the command '${result.pattern}'. I won't run it (or anything containing it) unless you lift it.`
         : `'${result.pattern}' was already forbidden.`,
       summary: result.added ? `forbade command '${result.pattern}'` : `'${result.pattern}' already forbidden`,
+    };
+  },
+};
+
+export const forbidMcpTool: Tool = {
+  name: "forbid_mcp_tool",
+  readOnly: false,
+  description:
+    "Forbid one MCP tool in THIS project by its full name (e.g. " +
+    "'mcp__github__delete_repo'). It stops being offered or callable and stays that " +
+    "way across sessions, without disabling the rest of that server. Use it when the " +
+    "user says a specific external integration is off-limits.",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    required: ["name"],
+    properties: {
+      name: {
+        type: "string",
+        description: "The full MCP tool name, as it appears in your tool list (mcp__server__tool).",
+      },
+    },
+  },
+
+  async execute(args, ctx): Promise<ToolResult> {
+    const name = typeof args.name === "string" ? args.name.trim() : "";
+    if (!name) return fail("`name` is required.");
+    // Guarding the shape matters: a bare tool name would be written to disk, never
+    // match anything, and look like the ban silently failed.
+    if (!isMcpToolName(name)) {
+      return fail(`'${name}' is not an MCP tool name. Use the full name from your tool list, e.g. 'mcp__github__create_issue'.`);
+    }
+
+    const result = await appendForbiddenMcpTool(projectRoot(ctx), name);
+    if (!result.pattern) return fail("the name is empty after normalization.");
+
+    // Mirror into the live config AND the live pool, so the ban takes effect on the
+    // next step rather than the next session.
+    if (ctx.governance && result.added) {
+      ctx.governance.forbidden = {
+        ...ctx.governance.forbidden,
+        mcpTools: [...(ctx.governance.forbidden.mcpTools ?? []), result.pattern],
+      };
+      ctx.mcp?.setForbidden(ctx.governance.forbidden.mcpTools ?? []);
+    }
+    return {
+      output: result.added
+        ? `Forbidden the MCP tool '${result.pattern}'. It's no longer available to me unless you lift it.`
+        : `'${result.pattern}' was already forbidden.`,
+      summary: result.added ? `forbade '${result.pattern}'` : `'${result.pattern}' already forbidden`,
     };
   },
 };

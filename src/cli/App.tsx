@@ -43,6 +43,8 @@ import { toolDisplay, isGroupable } from "./toolDisplay.js";
 import { summarizeTask, formatTokens, type TaskUsage } from "../dynamo/pricing.js";
 import type { Usage } from "../drivers/types.js";
 import type { ShellInfo } from "../tools/backgroundShells.js";
+import type { ConnectionStatus as McpStatus } from "../mcp/connection.js";
+import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig, splitArgs } from "../mcp/configWrite.js";
 import type { Entry, Session, SessionMeta } from "../memory/types.js";
 import { DEFAULT_MODE, modeById, nextMode, type ModeId } from "./modes.js";
 
@@ -74,6 +76,7 @@ type Overlay =
   | { kind: "model" }
   | { kind: "think" }
   | { kind: "shells"; items: ShellInfo[] }
+  | { kind: "mcp"; items: McpStatus[] }
   | { kind: "approval"; question: string; options: string[]; resolve: (choice: string) => void };
 
 // After you pick a session in /continue, the three ways to resume it.
@@ -222,9 +225,20 @@ export function App() {
     }
   }
 
+  // A server's state moved. Repaint, and surface anything the pool needs the user to
+  // know exactly once — chiefly a tool blocked because its description changed, which
+  // would otherwise show up only as a silently shorter tool list.
+  function handleMcpChange() {
+    setBgTick((t) => t + 1);
+    for (const notice of session.current?.toolContext.mcp?.takeNotices() ?? []) note(notice);
+  }
+
   function attachApproval(s: Session) {
     s.toolContext.requestApproval = (q, o) => askApproval.current(q, o);
     s.toolContext.backgroundShells?.setOnChange(handleBgChange);
+    // Servers connect in the background and can die or revive at any time; without this
+    // the /mcp view would only ever show what was true when the last key was pressed.
+    s.toolContext.mcp?.setOnChange(handleMcpChange);
     // A new/swapped session inherits the current mode's behavior.
     const m = modeById(modeRef.current);
     s.toolContext.planMode = m.readOnly;
@@ -366,12 +380,92 @@ export function App() {
     setBusy(false);
   }
 
+  /**
+   * `/mcp add <name> <command|url> [args…]` and `/mcp remove <name>`.
+   *
+   * Shares its parser and writer with the `add_mcp_server` tool, so a config the command
+   * accepts is exactly one the tool would, and vice versa. Connects immediately on add:
+   * writing the file and telling the user to restart would defeat the point.
+   */
+  async function mcpConfigCommand(arg: string) {
+    const cur = session.current;
+    if (!cur) return;
+    const argv = splitArgs(arg);
+    const verb = argv.shift();
+
+    if (verb === "remove" || verb === "rm") {
+      const target = argv[0];
+      if (!target) return say("Usage: /mcp remove <name>");
+      const root = cur.cwd;
+      const gone =
+        (await removeServerFromConfig(configPathFor("project", root), target)) ||
+        (await removeServerFromConfig(configPathFor("global", root), target));
+      say(
+        gone
+          ? `Removed '${target}' from the config. It stays connected until this session ends.`
+          : `No server called '${target}' is configured.`,
+      );
+      return;
+    }
+
+    const parsed = parseAddSpec(argv);
+    if (!parsed.ok) return say(parsed.error);
+
+    const path = configPathFor(parsed.spec.scope, cur.cwd);
+    try {
+      const written = await addServerToConfig(path, parsed.spec);
+      note(`${written.replaced ? "replaced" : "added"} '${parsed.spec.name}' in ${path} — connecting…`);
+      const status = await cur.toolContext.mcp?.addServer(parsed.spec.config);
+      if (status?.state === "connected") {
+        say(`${parsed.spec.name}: connected — ${status.toolCount} tool${status.toolCount === 1 ? "" : "s"} (protocol ${status.version}).`);
+      } else if (status) {
+        // Say what went wrong HERE rather than leaving it to be discovered in /mcp: a
+        // typo'd command is the most likely outcome of typing this by hand.
+        say(`${parsed.spec.name}: ${status.state}${status.error ? ` — ${status.error}` : ""}. It's saved; fix the config and /mcp to retry.`);
+      }
+    } catch (e) {
+      say(`Couldn't write ${path}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // What Enter does on a /mcp row: review blocked tools if there are any, otherwise
+  // reconnect. Blocked tools take priority because that is the state the user cannot
+  // otherwise resolve — reconnecting will not clear a quarantine.
+  async function mcpAction(name: string) {
+    const mgr = session.current?.toolContext.mcp;
+    if (mgr && mgr.blockedCountFor(name) > 0) {
+      const allowed = await mgr.reviewQuarantine((q, options) => askApproval.current(q, options));
+      note(allowed ? `${name}: blocked tools allowed for this project.` : `${name}: tools stay blocked.`);
+      return;
+    }
+    await reconnectMcp(name);
+  }
+
+  // Reconnect one MCP server by name, reporting the outcome in the chat rather than
+  // silently. A server that stays down is the thing a user most needs told about.
+  async function reconnectMcp(name: string) {
+    const mcp = session.current?.toolContext.mcp;
+    if (!mcp) return;
+    note(`reconnecting ${name}…`);
+    const status = await mcp.reconnect(name);
+    if (!status) return;
+    if (status.state === "connected") {
+      note(`${name} connected — ${status.toolCount} tool${status.toolCount === 1 ? "" : "s"}`);
+    } else {
+      note(`${name} is ${status.state}${status.error ? ` — ${status.error}` : ""}`);
+    }
+  }
+
   // Stop every root's background lane and any running shells from the current
   // session (before a swap).
   async function stopCurrentLanes() {
     const old = session.current?.toolContext;
     if (!old) return;
     old.backgroundShells?.dispose();
+    // MCP servers are child processes we own. Left running across a session swap they
+    // leak: each new session starts its own pool, and the old one keeps holding ports,
+    // locks and file handles with nothing able to reach it.
+    await old.mcp?.dispose();
     for (const ch of old.chassisByRoot?.values() ?? (old.chassis ? [old.chassis] : [])) {
       await stopChassis(ch);
     }
@@ -672,6 +766,9 @@ export function App() {
       if (sh && sh.status === "running" && session.current?.toolContext.backgroundShells?.kill(sh.id)) {
         note(`stopped shell #${sh.id} (${clipCmd(sh.command)})`);
       }
+    } else if (o.kind === "mcp") {
+      const server = o.items[index];
+      if (server && server.state !== "disabled") void mcpAction(server.name);
     } else if (o.kind === "approval") o.resolve(o.options[index] ?? o.options[0]!);
   }
   function onOverlayCancel() {
@@ -750,6 +847,26 @@ export function App() {
         return;
       }
       setOverlay({ kind: "shells", items: shells });
+      return;
+    }
+
+    // /mcp add … — write a server to mcp.json and connect it now.
+    if (name === "/mcp" && /^(add|remove|rm)/.test(arg)) {
+      await mcpConfigCommand(arg);
+      return;
+    }
+
+    // /mcp — server health; selecting one reconnects it.
+    if (name === "/mcp") {
+      const mcp = s.toolContext.mcp;
+      if (!mcp?.hasServers()) {
+        say(
+          "No MCP servers configured. Add them in .mindweave/mcp.json (this project) or " +
+            "~/.mindweave/mcp.json (everywhere), then /mcp to check they came up.",
+        );
+        return;
+      }
+      setOverlay({ kind: "mcp", items: mcp.statuses() });
       return;
     }
 
@@ -959,7 +1076,7 @@ export function App() {
     }
 
     say(
-      `Unknown command ${name}. Try /model, /think, /rules, /skills, /forbidden, /link, /include, /exclude, /shells, /context, /undo, /compact or /continue.`,
+      `Unknown command ${name}. Try /model, /think, /rules, /skills, /forbidden, /link, /include, /exclude, /shells, /mcp, /context, /undo, /compact or /continue.`,
     );
   }
 
@@ -1076,6 +1193,14 @@ export function App() {
       return (
         <Picker title="Background shells" items={items} width={width} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />
       );
+    }
+    if (overlay.kind === "mcp") {
+      const mgr = cur?.toolContext.mcp;
+      const items = overlay.items.map((srv) => ({
+        label: mcpLabel(srv),
+        description: mcpDetail(srv, mgr?.blockedCountFor(srv.name) ?? 0),
+      }));
+      return <Picker title="MCP servers" items={items} width={width} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />;
     }
     if (overlay.kind === "model") {
       const id = cur?.modelConfig.model;
@@ -1233,6 +1358,7 @@ const BASE_COMMANDS = [
   { name: "/include", description: "add a folder to the workspace: /include <path>" },
   { name: "/exclude", description: "remove an added folder: /exclude <label>" },
   { name: "/shells", description: "view or stop background commands (tests, servers)" },
+  { name: "/mcp", description: "view MCP servers; /mcp add <name> <command|url> to connect one" },
   { name: "/context", description: "show what Mindweave sees about this project" },
   { name: "/undo", description: "roll back the file changes from the last turn" },
   { name: "/compact", description: "summarize the conversation to free up context" },
@@ -1331,6 +1457,39 @@ function clipCmd(command: string, max = 44): string {
 
 function shellElapsed(sh: ShellInfo): string {
   return fmtElapsed(Math.floor((Date.now() - sh.startedAt) / 1000));
+}
+
+/** One MCP server's headline row: name plus a state marker readable at a glance. */
+export function mcpLabel(server: McpStatus): string {
+  const marker =
+    server.state === "connected" ? "●" : server.state === "pending" ? "◐" : server.state === "disabled" ? "○" : "✗";
+  return `${marker} ${server.name}`;
+}
+
+/** The dim detail column: what this server is doing, and what Enter would do to it. */
+export function mcpDetail(server: McpStatus, blocked = 0): string {
+  // A blocked tool is the one state the user must act on, so it outranks everything
+  // else in the row — including a healthy connection.
+  if (blocked > 0) {
+    return `${blocked} tool${blocked === 1 ? "" : "s"} BLOCKED (description changed) — Enter to review`;
+  }
+  switch (server.state) {
+    case "connected": {
+      const tools = `${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}`;
+      // The negotiated revision is worth surfacing: "legacy" is why a server may be
+      // missing capabilities, and it is otherwise invisible.
+      const proto = server.version ? ` · ${server.version}${server.legacy ? " (legacy)" : ""}` : "";
+      return `${tools}${proto} — Enter to reconnect`;
+    }
+    case "pending":
+      return "connecting…";
+    case "needs-auth":
+      return "needs authentication — Enter to retry";
+    case "disabled":
+      return "disabled in mcp.json";
+    default:
+      return `${server.error ?? "failed"} — Enter to retry`;
+  }
 }
 
 /**

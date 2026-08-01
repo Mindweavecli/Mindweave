@@ -13,8 +13,15 @@ import {
 import { estimateTokens } from "./compaction.js";
 
 test("no update until the session warms past the init bar", () => {
-  assert.equal(shouldUpdateSessionMemory(5_000, 0, false), false);
-  assert.equal(shouldUpdateSessionMemory(10_000, 0, false), true);
+  assert.equal(shouldUpdateSessionMemory(1_000, 0, false), false);
+  assert.equal(shouldUpdateSessionMemory(4_000, 0, false), true);
+});
+
+test("the init bar is low enough that an ordinary session writes notes", () => {
+  // The bar exists only so a two-message session doesn't pay for a model call. Set it
+  // high and real work finishes un-noted, which is what made read_session fall back to
+  // raw transcripts. A modest session must clear it.
+  assert.equal(shouldUpdateSessionMemory(6_000, 0, false), true, "6K is a real session, it gets notes");
 });
 
 test("after init, updates only once growth crosses the update threshold", () => {

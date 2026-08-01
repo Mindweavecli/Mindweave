@@ -1,0 +1,209 @@
+/**
+ * stdio.ts — MCP over a child process's stdin/stdout.
+ *
+ * The local transport, and the one almost every server in the wild uses. Framing is
+ * newline-delimited JSON, one JSON-RPC message per line. Worth stating plainly because
+ * it differs from the OTHER JSON-RPC we speak in this codebase: the language servers in
+ * `alternator/chassis` use LSP's `Content-Length` header framing. Same wire format,
+ * different envelope, and mixing them up produces a silent hang rather than an error.
+ *
+ * Everything here is defensive about the child, because the child is arbitrary
+ * third-party code that may write logs to stdout, die at any moment, or never answer:
+ *   - Non-JSON lines are skipped, not fatal. Servers print banners.
+ *   - Every request has a timeout; a server that never replies cannot wedge a turn.
+ *   - Death rejects all in-flight requests at once instead of leaving them hanging.
+ *   - stderr is drained and kept as a tail, because when a server fails to start the
+ *     reason is almost always on stderr and is otherwise lost.
+ */
+import { spawn, type ChildProcess } from "node:child_process";
+import { DEFAULT_REQUEST_TIMEOUT_MS, RpcError, type Notification, type Transport } from "./types.js";
+
+/** How much of the child's stderr to keep for diagnostics. */
+const STDERR_TAIL_CHARS = 4_000;
+
+export interface StdioOptions {
+  command: string;
+  args?: readonly string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  timeoutMs?: number;
+}
+
+/** Build a message frame. Exported for the framing test — the bug it guards (a missing
+ *  trailing newline) makes a server wait forever rather than fail. */
+export function frame(message: unknown): string {
+  return JSON.stringify(message) + "\n";
+}
+
+/**
+ * Split a buffer into complete lines plus the unconsumed remainder (pure).
+ *
+ * A pipe delivers arbitrary chunks: one read can hold three messages, or half of one.
+ * Keeping this pure is what lets the split-frame cases be tested without a process.
+ */
+export function drainLines(buffer: string): { lines: string[]; rest: string } {
+  const lines: string[] = [];
+  let rest = buffer;
+  let nl: number;
+  while ((nl = rest.indexOf("\n")) >= 0) {
+    const line = rest.slice(0, nl).trim();
+    rest = rest.slice(nl + 1);
+    if (line) lines.push(line);
+  }
+  return { lines, rest };
+}
+
+export class StdioTransport implements Transport {
+  private readonly proc: ChildProcess;
+  private nextId = 1;
+  private buffer = "";
+  private stderrTail = "";
+  private disposed = false;
+  private readonly timeoutMs: number;
+  private readonly pending = new Map<
+    number,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }
+  >();
+  private notificationHandler: ((notification: Notification) => void) | null = null;
+  private resolveClosed!: () => void;
+  readonly closed: Promise<void>;
+
+  constructor(options: StdioOptions) {
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.closed = new Promise<void>((resolve) => {
+      this.resolveClosed = resolve;
+    });
+
+    const args = [...(options.args ?? [])];
+    const env = { ...process.env, ...(options.env ?? {}) };
+    // Windows npm shims (.cmd/.bat) are batch files, not executables, so spawn cannot
+    // run them directly — they need a shell. Carried over from the previous
+    // implementation because it is correct and non-obvious.
+    const winShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(options.command);
+    this.proc = winShim
+      ? spawn(`"${options.command}" ${args.join(" ")}`, {
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+          shell: true,
+          env,
+          ...(options.cwd ? { cwd: options.cwd } : {}),
+        })
+      : spawn(options.command, args, {
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+          env,
+          ...(options.cwd ? { cwd: options.cwd } : {}),
+        });
+
+    this.proc.stdout?.setEncoding("utf8");
+    this.proc.stdout?.on("data", (chunk: string) => this.onData(chunk));
+    this.proc.stderr?.setEncoding("utf8");
+    this.proc.stderr?.on("data", (chunk: string) => {
+      this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
+    });
+    // Both are terminal for us; `error` fires when the command does not exist at all.
+    this.proc.on("exit", (code) => this.die(new Error(`mcp server exited (code ${code ?? "unknown"})${this.stderrNote()}`)));
+    this.proc.on("error", (e) => this.die(new Error(`mcp server failed to start: ${e.message}${this.stderrNote()}`)));
+  }
+
+  onNotification(handler: (notification: Notification) => void): void {
+    this.notificationHandler = handler;
+  }
+
+  /** The child's recent stderr, if any — usually the actual reason a server failed. */
+  stderr(): string {
+    return this.stderrTail.trim();
+  }
+
+  private stderrNote(): string {
+    const tail = this.stderr();
+    return tail ? `: ${tail.split("\n").slice(-3).join(" ").slice(0, 300)}` : "";
+  }
+
+  private onData(chunk: string): void {
+    this.buffer += chunk;
+    const { lines, rest } = drainLines(this.buffer);
+    this.buffer = rest;
+    for (const line of lines) {
+      let msg: { id?: unknown; result?: unknown; error?: { code?: unknown; message?: unknown; data?: unknown } };
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue; // a banner, a log line, anything — not our problem
+      }
+      if (typeof msg.id !== "number") {
+        // Server-initiated. Nothing awaits it, but `subscriptions/listen` change
+        // notifications arrive this way on stdio, so they have to be handed up rather
+        // than dropped on the floor the way Phase 1 did.
+        const note = msg as { method?: unknown; params?: unknown };
+        if (typeof note.method === "string" && this.notificationHandler) {
+          this.notificationHandler({
+            method: note.method,
+            ...(note.params && typeof note.params === "object" ? { params: note.params as Record<string, unknown> } : {}),
+          });
+        }
+        continue;
+      }
+      const waiter = this.pending.get(msg.id);
+      if (!waiter) continue;
+      this.pending.delete(msg.id);
+      clearTimeout(waiter.timer);
+      if (msg.error) {
+        const code = typeof msg.error.code === "number" ? msg.error.code : -32603;
+        const message = typeof msg.error.message === "string" ? msg.error.message : "mcp error";
+        waiter.reject(new RpcError(code, message, msg.error.data));
+      } else {
+        waiter.resolve(msg.result);
+      }
+    }
+  }
+
+  request(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    if (this.disposed) return Promise.reject(new RpcError(-32603, "mcp transport is closed"));
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new RpcError(-32603, `mcp timeout after ${this.timeoutMs}ms: ${method}`));
+      }, this.timeoutMs);
+      // Do not hold the event loop open just to wait on a slow server.
+      timer.unref?.();
+      this.pending.set(id, { resolve, reject, timer });
+      this.write({ jsonrpc: "2.0", id, method, ...(params ? { params } : {}) });
+    });
+  }
+
+  notify(method: string, params?: Record<string, unknown>): void {
+    if (this.disposed) return;
+    this.write({ jsonrpc: "2.0", method, ...(params ? { params } : {}) });
+  }
+
+  private write(message: unknown): void {
+    try {
+      this.proc.stdin?.write(frame(message));
+    } catch {
+      // The child is gone; the pending request will time out or be failed by `die`.
+    }
+  }
+
+  /** Fail everything in flight and mark the transport dead. Idempotent. */
+  private die(error: Error): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const waiter of this.pending.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.pending.clear();
+    this.resolveClosed();
+  }
+
+  async close(): Promise<void> {
+    if (!this.disposed) this.die(new Error("mcp transport closed"));
+    try {
+      this.proc.kill();
+    } catch {
+      // Already gone.
+    }
+  }
+}

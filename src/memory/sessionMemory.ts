@@ -27,8 +27,16 @@ const env = (name: string, fallback: number): number => {
   return Number.isFinite(v) && v > 0 ? v : fallback;
 };
 
-/** First update once the transcript passes this (let a session warm up first). */
-const INIT_THRESHOLD = env("MINDWEAVE_SESSION_MEMORY_INIT", 10_000);
+/**
+ * First update once the transcript passes this (let a session warm up first).
+ *
+ * Deliberately LOW. At 10K a session could do a whole piece of real work and end
+ * having never written a note, so a later `read_session` found nothing and fell back
+ * to the raw transcript — a worse answer, for more tokens, after an extra round trip.
+ * The bar only exists so a two-message session doesn't pay for a model call; 4K is
+ * enough warm-up for that and cheap enough that ordinary sessions get real notes.
+ */
+const INIT_THRESHOLD = env("MINDWEAVE_SESSION_MEMORY_INIT", 4_000);
 /** Refresh the notes after this much further growth (token-gated). */
 const UPDATE_THRESHOLD = env("MINDWEAVE_SESSION_MEMORY_UPDATE", 12_000);
 /** How many recent transcript entries feed an update (the notes carry the older state). */

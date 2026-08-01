@@ -21,6 +21,8 @@ import { loadGovernance } from "../governor/index.js";
 import type { Governance } from "../governor/types.js";
 import { loadModelConfig } from "../dynamo/model.js";
 import { ensureMemoryDir, loadMemoryIndex, memoryDir } from "./autoMemory.js";
+import { loadMcpConfig } from "../mcp/config.js";
+import { McpManager } from "../mcp/manager.js";
 
 /** Read the project's MINDWEAVE.md (facts the agent should always know). "" if none. */
 async function loadProjectMemory(cwd: string): Promise<string> {
@@ -40,6 +42,37 @@ async function loadProjectMemory(cwd: string): Promise<string> {
  */
 export async function reloadProjectMemory(session: Session): Promise<void> {
   session.projectMemory = await loadProjectMemory(session.cwd);
+}
+
+/**
+ * Attach the MCP server pool to a session.
+ *
+ * Deliberately NOT awaited. Servers are third-party processes and a slow one would sit
+ * between the user pressing enter and the first paint, so the pool comes up in the
+ * background and its tools appear once they are ready. Failures are already states
+ * rather than exceptions, so nothing here can reject; the `catch` is belt and braces.
+ *
+ * The cost of not awaiting is that a server landing mid-session changes the tool list
+ * and invalidates the cached prompt prefix. That is known and priced (docs/mcp-plan.md
+ * §6) and is fixed in Phase 3 by rendering MCP schemas into the volatile tail, which is
+ * the right fix regardless of when servers connect, so the fast start is kept.
+ */
+function attachMcp(ctx: ToolContext, cwd: string): void {
+  const manager = new McpManager();
+  ctx.mcp = manager;
+  void loadMcpConfig(cwd)
+    .then(async (configs) => {
+      await manager.start(configs);
+      // Governance is applied AFTER connecting, because both gates are about the tools
+      // a server actually turned out to advertise: a forbidden name only matters once
+      // it exists, and a changed description can only be noticed against a live one.
+      manager.setForbidden(ctx.governance?.forbidden.mcpTools ?? []);
+      // Rug-pull check. `requestApproval` may not be attached yet (the CLI wires it
+      // just after session creation), in which case `verifyTrust` fails closed and
+      // changed tools stay blocked until the next session — the safe direction.
+      await manager.verifyTrust(cwd, ctx.requestApproval);
+    })
+    .catch(() => {});
 }
 
 /**
@@ -143,6 +176,7 @@ export async function createSession(cwd: string = process.cwd()): Promise<Sessio
   const toolContext = freshToolContext(cwd, governance, [cwd]);
   // So the session tools can exclude this conversation from "your past sessions".
   toolContext.sessionId = id;
+  attachMcp(toolContext, cwd);
   await seedProjectMemoryRead(toolContext, projectMemory);
   return {
     id,
@@ -236,6 +270,7 @@ export async function resumeSession(
   const roots = [cwd, ...extra];
   const toolContext = freshToolContext(cwd, governance, roots);
   toolContext.sessionId = meta.id;
+  attachMcp(toolContext, cwd);
   await seedProjectMemoryRead(toolContext, projectMemory);
   return {
     id: meta.id,

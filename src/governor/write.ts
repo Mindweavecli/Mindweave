@@ -123,6 +123,30 @@ export async function appendForbidden(
 }
 
 /**
+ * Append an MCP tool name to `forbidden-mcp-tools.md`. Sibling of
+ * appendForbiddenCommand; tool names are identifiers, kept verbatim.
+ */
+export async function appendForbiddenMcpTool(cwd: string, name: string): Promise<{ added: boolean; pattern: string }> {
+  const normalized = name.trim();
+  if (!normalized) return { added: false, pattern: normalized };
+
+  const base = projectDir(cwd);
+  const file = join(base, "forbidden-mcp-tools.md");
+  let text = "";
+  try {
+    text = await fs.readFile(file, "utf8");
+  } catch {
+    /* no forbidden-mcp-tools.md yet */
+  }
+  if (parseForbiddenCommands(text).includes(normalized)) return { added: false, pattern: normalized };
+
+  await fs.mkdir(base, { recursive: true });
+  const separator = text && !text.endsWith("\n") ? "\n" : "";
+  await fs.writeFile(file, `${text}${separator}${normalized}\n`, "utf8");
+  return { added: true, pattern: normalized };
+}
+
+/**
  * Append a command pattern to `forbidden-commands.md` in the project's state dir.
  * Idempotent — `{ added: false }` if it was already forbidden. Sibling of
  * appendForbidden; command patterns are kept verbatim (trimmed), not path-normalized.

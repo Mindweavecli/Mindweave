@@ -27,7 +27,7 @@ export function sharpContextWindow(model: string): number {
 
 /**
  * Autocompact bar for a given window: summarize once the transcript crosses
- * (window − summary reserve − buffer). For a 128K sharp window that's ~95K.
+ * (window − summary reserve − buffer). For a 256K sharp window that's ~223K.
  */
 export function autoBarFor(window: number): number {
   return Math.max(20_000, window - SUMMARY_RESERVE - COMPACT_BUFFER);
@@ -36,7 +36,7 @@ export function autoBarFor(window: number): number {
 /**
  * Microcompact bar for a given window: clear old tool-result bodies well before
  * the autocompact bar, so the working set stays lean continuously rather than only
- * at the summary point. 30% of the window (~38K on a 128K model).
+ * at the summary point. 30% of the window (~77K on a 256K model).
  */
 export function microBarFor(window: number): number {
   return Math.round(window * 0.3);

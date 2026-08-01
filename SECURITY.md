@@ -34,6 +34,20 @@ These live in `src/tools/guard.ts` and the governor, and none of them depend on 
 
 What this is **not**: a sandbox, a jail, or a defense against a model deliberately trying to evade a string check. A single-user local tool does not ship a shell analyzer, and pretending otherwise would be worse than saying so. If you need true isolation, run MindWeave in a container or a VM.
 
+## MCP servers
+
+An MCP server is third-party code you pointed MindWeave at, and its tool descriptions go straight into the model's prompt where they are read as instructions. That makes a description an injection surface, not documentation. Three attacks follow from it: **tool poisoning** (hidden instructions in a description or schema), **rug pulls** (a clean server ships an update that poisons one), and **cross-server shadowing** (one server's description steering the agent into misusing another server's tools).
+
+What MindWeave does about it:
+
+- **Descriptions and schemas are fingerprinted.** Every tool is hashed on first sight and the record is kept per project. If a description or its parameter schema moves, the tool is **blocked** and you are asked, with the change named. Decline and it stays blocked, and the old fingerprint is kept so you are asked again next session rather than the change being silently accepted. With no way to ask, it fails closed.
+- **Server output is framed as data.** Results come back inside a delimited block marked as external content to reason about, never as instructions to follow.
+- **Descriptions are length-capped** before they reach the prompt, which bounds what one server can inject or cost you.
+- **`forbid_mcp_tool <name>`** bans a single tool across sessions without disabling the rest of its server. It is removed from every path — advertised list, search, activation, and dispatch — not just the obvious one.
+- **A failing or hostile server cannot take the session down.** Connection failures become states, not exceptions.
+
+What this is **not**: verification that a server is trustworthy. **A server that is malicious the first time you connect passes every check above.** First sight is trusted by construction — there is no signature to check and no reputation to consult. This catches *change*, not badness. No MCP client currently solves the day-one case, so treat adding an MCP server with the same care as installing a dependency: read what it is before you point at it.
+
 ## Your key
 
 MindWeave is bring-your-own-key. Keys are read from `~/.mindweave/.env`, a project `.env`, or your shell environment, and that file is written with `0600` permissions. Keys are never logged, never printed into the transcript, and never sent anywhere except the provider they belong to. Nothing about a key crosses a driver boundary: each provider's driver only ever sees its own.

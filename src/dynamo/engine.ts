@@ -484,8 +484,23 @@ export async function respond(session: Session, options: RespondOptions = {}): P
   // from here down (including from inside a tool).
   await ensureDriver(session.modelConfig.model);
   const planMode = session.toolContext.planMode ?? false;
-  const tools = toolSchemas({ planMode, readOnlyOnly: session.toolContext.readOnlyTools });
-  const lookup = (name: string) => findTool(name);
+  // Built-in tools plus whatever the connected MCP servers offer. An MCP tool is
+  // dispatched, displayed and gated by exactly the same machinery as a built-in — the
+  // merge here and the lookup fallback below are the entire integration.
+  const readOnlyTurn = planMode || session.toolContext.readOnlyTools === true;
+  // ONE frozen view of the MCP catalog for the whole turn, used for BOTH the advertised
+  // list and dispatch. Reading live state twice let a server die (or announce a changed
+  // tool list) between the two, so the model could be refused a tool we had just told it
+  // it had. It also pins the exact `tools` bytes across the turn's steps, which is what
+  // keeps the provider's cached prefix intact while the tool loop runs.
+  const mcpTurn = session.toolContext.mcp?.snapshot(readOnlyTurn);
+  const builtinTools = toolSchemas({ planMode, readOnlyOnly: session.toolContext.readOnlyTools });
+  // Recomputed PER STEP, not once per turn: a large catalog is held behind
+  // `find_mcp_tools`, and a tool the model just searched for has to be callable on the
+  // very next step or the search was a lie. When nothing is deferred (the common case)
+  // this returns identical bytes every step, so the cached prefix is untouched.
+  const stepTools = () => [...builtinTools, ...(mcpTurn?.exposedSchemas() ?? [])];
+  const lookup = (name: string) => findTool(name) ?? mcpTurn?.asTool(name);
   const stepLimit = options.maxSteps ?? STEP_BUDGET;
   // Sinks the spawn_subagent tool reuses (it only ever gets the ToolContext, not the
   // Session): fork a scoped child, forward the child's usage to this turn's meter,
@@ -527,18 +542,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
   // live outside the transcript, so compaction never erodes them — which is what lets a
   // session run indefinitely without slowly losing the thread. One cheap call, gated so
   // it fires rarely; degrade-safe.
-  if (
-    shouldUpdateSessionMemory(
-      estimateEntriesTokens(session.transcript),
-      session.sessionMemoryTokens ?? 0,
-      session.sessionMemoryInit ?? false,
-    )
-  ) {
-    // Silent by design — session memory is background machinery, not something the user
-    // watches. No activity line; it just keeps the notes current.
-    await updateSessionMemory(session);
-    await options.persist?.(); // durable: the notes sidecar is written by the persister
-  }
+  await sweepSessionMemory(session, options);
 
   // Computed once per turn from the current working set (refreshes as reads change
   // across turns); kept tiny to bound per-turn token cost.
@@ -581,7 +585,18 @@ export async function respond(session: Session, options: RespondOptions = {}): P
   // the request that drove it. No-op when nothing was edited.
   const turnLabel = lastUserText(session);
   try {
-    return await runTurn();
+    const reply = await runTurn();
+    // END-OF-TURN sweep. The turn-start check above works one turn behind: it can only
+    // see what happened before this turn ran, so a session whose LAST turn did the real
+    // work ended with notes that never mentioned it (or none at all). Sweeping here is
+    // the "write a note before the session can end" fix, without needing a process-exit
+    // hook — a turn boundary is the only moment we reliably get. The token gate means
+    // this and the turn-start check can never both fire for the same growth.
+    //
+    // Deliberately NOT in the `finally`: that path also runs on abort and on throw, and
+    // a user pressing Esc should not be charged for a background model call.
+    if (!options.signal?.aborted) await sweepSessionMemory(session, options);
+    return reply;
   } finally {
     session.toolContext.checkpoints?.seal(turnLabel);
   }
@@ -604,7 +619,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     session.toolContext.workingSetFull = workingSet.fullPaths;
 
     let result: StreamResult;
-    const request = buildRequest(session, relevantMap, workingSet.text, bgEvents, tools);
+    const request = buildRequest(session, relevantMap, workingSet.text, bgEvents, stepTools());
     try {
       result = await streamModel(request, options);
     } catch (error) {
@@ -980,6 +995,29 @@ function emitUsage(result: StreamResult, options: RespondOptions): void {
  * Run the compaction cascade if the transcript has grown enough: microcompact
  * (lossless) first, then autocompact (a summary) if still over the higher bar.
  */
+/**
+ * Refresh the maintained "state of this session" notes if the transcript has grown
+ * enough since the last refresh. They live outside the transcript, so compaction never
+ * erodes them — which is what lets a session run indefinitely without losing the thread,
+ * and what a later `read_session` reads to answer "what did we do last time".
+ *
+ * Called at BOTH turn start (so this turn's context carries current notes) and turn end
+ * (so the last turn of a session is never missing from them). One cheap call, token-gated
+ * so it fires rarely and never twice for the same growth. Silent by design: this is
+ * background machinery, not something the user watches. Degrade-safe — a failed update
+ * keeps the last good notes.
+ */
+async function sweepSessionMemory(session: Session, options: RespondOptions): Promise<void> {
+  const grown = shouldUpdateSessionMemory(
+    estimateEntriesTokens(session.transcript),
+    session.sessionMemoryTokens ?? 0,
+    session.sessionMemoryInit ?? false,
+  );
+  if (!grown) return;
+  await updateSessionMemory(session);
+  await options.persist?.(); // durable: the notes sidecar is written by the persister
+}
+
 async function maybeCompact(session: Session, options: RespondOptions): Promise<void> {
   const model = session.modelConfig.model;
   // Model-anchored bars (env still overrides), so the thresholds are right per model
@@ -987,7 +1025,15 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
   const microBar = envInt("MINDWEAVE_MICROCOMPACT_TOKENS", microCompactThreshold(model));
   const autoBar = envInt("MINDWEAVE_AUTOCOMPACT_TOKENS", autoCompactThreshold(model));
 
-  if (estimateEntriesTokens(session.transcript) >= microBar) {
+  // MCP tool schemas are sent on every turn but live OUTSIDE the transcript, so the bars
+  // could not see them: a 30K-token catalog meant the model was 30K deeper into its real
+  // context than this arithmetic believed, and every threshold fired that much too late.
+  // Counting it here restores the meaning of the bars — they are about how full the
+  // context is, not how long the transcript is.
+  const mcpTokens = session.toolContext.mcp?.estimatedTokens() ?? 0;
+  const used = () => estimateEntriesTokens(session.transcript) + mcpTokens;
+
+  if (used() >= microBar) {
     const { entries, cleared, clearedIds, recapsCleared } = microcompact(session.transcript);
     if (cleared > 0 || recapsCleared > 0) {
       session.transcript = entries;
@@ -998,10 +1044,7 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
   // Circuit-breaker: once autocompact has failed MAX_COMPACT_FAILURES times this
   // session, stop trying (the transcript is likely irrecoverable) rather than burning
   // a doomed summarizer call every turn.
-  if (
-    estimateEntriesTokens(session.transcript) >= autoBar &&
-    (session.compactFailures ?? 0) < MAX_COMPACT_FAILURES
-  ) {
+  if (used() >= autoBar && (session.compactFailures ?? 0) < MAX_COMPACT_FAILURES) {
     await autocompact(session, options);
   }
 }

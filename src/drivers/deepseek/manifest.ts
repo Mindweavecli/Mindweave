@@ -81,12 +81,41 @@ export function price(model: ModelId): ModelPrice {
 
 /**
  * The model's USABLE context window — where retrieval and attention stay reliable,
- * not the raw storage cap. DeepSeek stores 1M tokens but degrades from tool-noise
- * dilution well before that, and on BYOK every token is the user's money, so
- * anchoring compaction here is both more accurate and cheaper.
+ * not the raw storage cap. Both models store 1M tokens (native pretraining, not a
+ * RoPE-extended stretch), but V4 runs hybrid sparse attention (CSA at 4x KV
+ * compression alternating with HCA at 128x), and compression is where accuracy
+ * leaks at range.
+ *
+ * The number that matters for an agent is MULTI-needle retrieval, not single: a
+ * coding session recalls many scattered facts (files read, decisions made, which
+ * command failed), which is the multi-needle shape. That is also V4's weakest
+ * axis — its single-to-multi drop at 1M is the largest in the field.
+ *
+ * Published V4-Pro figures (NIAH-2 / MRCR):
+ *   200K  single 96%   multi-8 84%
+ *   256K              multi-8 ~0.82   ← still flat
+ *   1M    single 78%   multi-8 41%    ← cliff
+ *
+ * So Pro anchors at 256K: the top of the demonstrated flat region. Past it the
+ * evidence thins to a single bad endpoint, and on BYOK the user pays for every
+ * token we let the transcript grow into.
  */
-export function contextWindow(_model: ModelId): number {
-  return 128_000;
+const PRO_WINDOW = 256_000;
+
+/**
+ * Flash gets its own, lower value rather than inheriting Pro's curve.
+ *
+ * Flash is 284B with 13B active against Pro's 1.6T/49B, and there is NO published
+ * multi-needle data for it at any length. The one datapoint (100% single-needle
+ * NIAH at 435K) is the easy axis and says nothing about the axis we care about.
+ * 192K is a deliberate judgment call under absent data: clearly above the old
+ * shared 128K, clearly inside Pro's proven-flat region, and revisable the moment
+ * someone publishes a Flash multi-needle curve.
+ */
+const FLASH_WINDOW = 192_000;
+
+export function contextWindow(model: ModelId): number {
+  return model === PRO ? PRO_WINDOW : FLASH_WINDOW;
 }
 
 /**

@@ -18,22 +18,28 @@ MindWeave is a coding agent that lives in your terminal and works directly insid
 
 It's built lean on purpose. Instead of burning your context budget on heavy scaffolding, MindWeave keeps prompts thin and leaves the model room to actually reason about your code.
 
-## v1.2 is out: the agent knows its own work
+## v1.3 is out: MCP
 
-Everything in this release came out of running MindWeave on a real project and watching it fail. Every item below is a bug we reproduced, not a feature someone imagined.
+MindWeave speaks the **Model Context Protocol**, so external tool servers — GitHub, Postgres, your company's internal API — become tools the agent can use directly.
 
-**It can read its own past sessions.** Ask "what did we do last session" and it answers, because it now has `list_sessions` and `read_session` and will go and look. Previously it could only tell you a number and suggest you run `/continue` yourself. The transcripts had been saved on disk the whole time with nothing to read them, and the system prompt made it worse by stating outright that it couldn't see them. It was obeying an instruction that had quietly become false. Both tools are read-only, and `read_session` returns a session's own running notes rather than the raw log, so asking about old work doesn't cost a fortune.
+**You don't start anything.** Add a server once and MindWeave spawns and manages it for you, every session, in the background:
 
-**A repeated failure interrupts instead of killing the turn.** MindWeave has always stopped an agent that runs the same failing command over and over. The problem was that it stopped it silently, on the third try, without ever telling the model it was repeating itself. So the model got cut off for a fact it had no way to see. Now the first trip injects that fact, including the shell's real working directory, and lets it diagnose. Only a repeat after being told ends the turn.
+```
+/mcp add github npx -y @modelcontextprotocol/server-github --env GITHUB_TOKEN=ghp_x
+/mcp add --http internal https://tools.acme.dev/mcp
+```
 
-**When a turn stops early, you find out why.** Every one of those safety stops built a clear explanation, recorded it, and then dropped it. The message reached the model and the transcript, never the screen. A tripped guard was indistinguishable from a crash. All of them now print.
+Or just say it — "add the github mcp server, my token's in GITHUB_TOKEN" — and the agent writes the config after asking you to confirm. Either way the server connects immediately and its tools are usable in the same turn. `/mcp` shows what's running, which protocol each server negotiated, and reconnects anything that's down.
 
-**`cd` no longer poisons the next command.** The working directory persists between commands within a turn, which is useful and was invisible: nothing told the model it had moved, so its next relative path resolved from the wrong place and built a doubled path that failed. Commands that move the shell now say so.
+**It targets the current protocol, not last year's.** The 2026-07-28 revision made MCP stateless: no handshake, no session id, no SSE resumability, and a new `server/discover` call. Almost every server in the wild still speaks an older revision, so MindWeave probes and speaks whichever one a server actually knows. Both stdio and Streamable HTTP work. A server that crashes is revived automatically, up to a point, and then says so rather than retrying forever.
 
-**The version in the banner is the real one.** It read `v0.0.1` for three releases while the package said otherwise. Read from `package.json` now, with a test comparing the two.
+**A big catalog doesn't drown the model.** Past 25 tools, servers' tools are held back and the agent searches for what it needs instead. This is about accuracy before cost: a model choosing among 300 tools chooses worse than one choosing among 40, however much context is free.
 
-**Next up: MCP.** External tool servers are the big one, and they're what the next release is about. Everything else is smaller: shorter sessions don't write notes yet, so asking about a brief one falls back to reading its whole transcript.
+**Server tool descriptions are treated as untrusted, because they are.** A description goes straight into the model's prompt and is read as instruction, which makes it an injection surface. MindWeave fingerprints every tool's description and schema, and if one changes it blocks the tool and asks you before letting it run again — that's the "rug pull" attack, where a server you trust ships a poisoned update. Server output is delimited as data rather than instruction, and `forbid_mcp_tool` bans a single tool without disabling its server. What this does *not* do is verify a server is safe to begin with; [SECURITY.md](SECURITY.md) is explicit about that.
 
+**Also in this release.** DeepSeek's usable context window was set far too conservatively (128K against a real 1M) and ignored which model you were on, so long sessions compacted much earlier than they needed to. V4-Pro now runs to 256K and V4-Flash to 192K, anchored to where multi-needle retrieval actually holds up rather than to a round number. Short sessions now write notes too, so asking about a brief one no longer falls back to re-reading its whole transcript.
+
+**Next up:** MCP resources and prompts, then OAuth for remote servers that need it.
 
 ## Features
 
@@ -42,6 +48,7 @@ Everything in this release came out of running MindWeave on a real project and w
 - **Deterministic code intelligence.** A background lane indexes your repo with tree-sitter and language servers (no tokens, no cost) so the agent understands your codebase, not just the open file.
 - **Real tools.** File read/edit, multi-file edits, ripgrep search, shell with background jobs, sub-agents, and diagnostics — with read-before-edit safety and an undo net.
 - **Session memory.** Long sessions stay sharp: automatic compaction plus a continuously-maintained state summary that survives it. The agent can also read its own earlier sessions in a project, so "what did we do last time" gets a real answer.
+- **MCP servers.** Connect external tool servers (GitHub, Postgres, your own) with `/mcp add` or just by asking. They start with your session, and their tools are treated as untrusted by default.
 - **Per-project governor.** Give a project standing rules, reusable skills, and forbidden paths/commands that the agent must respect.
 - **Interaction modes.** Lightning (auto), Architect (plan-only, read-only), cycled with `shift-tab`.
 
@@ -92,6 +99,33 @@ You only need the key for the provider whose models you use. Set both and you ca
 
 Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/drivers/PROVIDERS.md) for the current model list, and [`src/drivers/README.md`](src/drivers/README.md) if you want to build a driver for another model.
 
+## Connecting MCP servers
+
+[MCP](https://modelcontextprotocol.io) servers give the agent tools MindWeave doesn't ship: issue trackers, databases, cloud APIs, internal services. Add one and it's available from that moment on, in every future session, with nothing to start by hand.
+
+```bash
+# a local server
+/mcp add github npx -y @modelcontextprotocol/server-github --env GITHUB_TOKEN=ghp_x
+
+# a remote one
+/mcp add --http internal https://tools.acme.dev/mcp --header 'Authorization: Bearer t'
+
+# available in every project, not just this one
+/mcp add --global notes npx -y some-notes-server
+
+# a server with its own flags: everything after -- goes to the server
+/mcp add mine my-server -- --port 9000 --verbose
+
+/mcp             # what's running, and reconnect anything that isn't
+/mcp remove x    # stop configuring it
+```
+
+You can also just ask: *"add the github mcp server, my token's in GITHUB_TOKEN."* The agent writes the config and asks you to confirm before anything is saved.
+
+Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mcp.json` (everywhere), in the same format every other MCP client uses, so an existing config can be pasted straight in.
+
+**Two things worth knowing.** If a server's tool description changes between sessions, that tool is blocked until you approve it — a changed description is the main way a trusted server turns hostile. And remote servers requiring OAuth aren't supported yet; they'll show as `needs-auth`.
+
 ## Roadmap
 
 - [x] Terminal agent loop + streaming UI
@@ -104,13 +138,28 @@ Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/driv
 - [x] **v1.1: Anthropic (Claude) driver, providers loaded on demand, provider-aware setup, cut off replies caught**
 - [x] **v1.1.2: shared core made provider-neutral, with tests guarding it**
 - [x] **v1.2: reads its own past sessions, failure loops interrupt instead of stopping dead, every early stop explains itself**
-- [ ] **v1.3: MCP / external tool servers** — the next release
+- [x] **v1.3: MCP / external tool servers, with rug-pull protection and a deferred tool pool**
+- [ ] **v1.4: MCP resources & prompts, OAuth for remote servers** — the next release
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …) — community-built
 - [ ] Verified macOS / Linux support
+
+## Found a bug?
+
+**Please open an issue.** MindWeave is developed by running it on real projects and fixing what breaks, so a reproduction from someone else's setup is genuinely the most useful thing you can send. Nearly every item in the release notes above started as a failure someone watched happen.
+
+Useful to include: your OS and terminal, which model you were on, and the steps that led to it. If the agent did something odd rather than crashed, the transcript around it helps more than a description does.
+
+Especially worth reporting:
+- **Anything MCP.** It's new in v1.3, and it has only been tested against servers we wrote. Real servers will find edges we didn't.
+- **A tool the agent was offered but couldn't call**, or one it insisted didn't exist.
+- **Anything on macOS or Linux.** Development happens on Windows; those two are believed to work but aren't verified.
+- **A prompt or menu that says something untrue.** Those can't crash and don't fail tests, so they survive until a person notices.
 
 ## Contributing
 
 MindWeave is open source and contributions are welcome — especially **model drivers**. See the [Contributing Guide](CONTRIBUTING.md), and open an issue or a Discussion to claim a provider.
+
+Small fixes and reproduced bugs with a failing test can go straight to a pull request. For anything larger, start a Discussion first: the core is deliberately close to finished, and the guide explains what that means for scope before you spend an afternoon on it.
 
 ## License
 

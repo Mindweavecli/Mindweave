@@ -51,6 +51,14 @@ export function parseForbiddenCommands(text: string): string[] {
  * so `tauri dev` blocks `npm run tauri  dev` alike. Deterministic and strict by
  * design — the model cannot run a forbidden command; only the user can lift it.
  */
+/**
+ * Parse `forbidden-mcp-tools.md` into tool names. Verbatim like commands, not
+ * path-normalized: an MCP tool name is an identifier, not a path.
+ */
+export function parseForbiddenMcpTools(text: string): string[] {
+  return parseForbiddenCommands(text);
+}
+
 export function forbiddenCommandPatternReason(
   cfg: ForbiddenConfig | undefined,
   command: string,

@@ -19,7 +19,7 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { loadRules } from "./rules.js";
 import { loadSkillCatalog } from "./skills.js";
-import { parseForbidden, parseForbiddenCommands } from "./forbidden.js";
+import { parseForbidden, parseForbiddenCommands, parseForbiddenMcpTools } from "./forbidden.js";
 import type { Governance } from "./types.js";
 
 /** Read a project state file (forbidden.md / forbidden-commands.md), "" if absent. */
@@ -34,11 +34,12 @@ async function readStateFile(stateDir: string, name: string): Promise<string> {
 /** Load all governance for the project rooted at `cwd`. Always succeeds (empties). */
 export async function loadGovernance(cwd: string): Promise<Governance> {
   const stateDir = projectDir(cwd);
-  const [rules, skills, forbiddenText, forbiddenCmdText] = await Promise.all([
+  const [rules, skills, forbiddenText, forbiddenCmdText, forbiddenMcpText] = await Promise.all([
     loadRules(stateDir),
     loadSkillCatalog(stateDir),
     readStateFile(stateDir, "forbidden.md"),
     readStateFile(stateDir, "forbidden-commands.md"),
+    readStateFile(stateDir, "forbidden-mcp-tools.md"),
   ]);
   return {
     rules,
@@ -46,6 +47,7 @@ export async function loadGovernance(cwd: string): Promise<Governance> {
     forbidden: {
       patterns: parseForbidden(forbiddenText),
       commands: parseForbiddenCommands(forbiddenCmdText),
+      mcpTools: parseForbiddenMcpTools(forbiddenMcpText),
       root: cwd,
     },
   };

@@ -21,13 +21,15 @@ import { diagnosticsTool } from "./diagnostics.js";
 import { webFetch } from "./webFetch.js";
 import { todoWrite } from "./todo.js";
 import { useSkill } from "./useSkill.js";
-import { rememberRule, forbidPath, forbidCommand, createSkill } from "./governorTools.js";
+import { rememberRule, forbidPath, forbidCommand, forbidMcpTool, createSkill } from "./governorTools.js";
 import { saveMemoryTool } from "./saveMemory.js";
 import { askUserTool } from "./askUser.js";
 import { addDirectory, linkWorkspace } from "./workspace.js";
 import { shellOutput, killShell, listShells } from "./shellTools.js";
 import { spawnSubagent } from "./subagent.js";
 import { listSessionsTool, readSessionTool } from "./sessionTools.js";
+import { findMcpTools } from "./mcpSearch.js";
+import { addMcpServer } from "./mcpAdd.js";
 
 export const TOOLS: Tool[] = [
   // Discovery (read-only)
@@ -46,6 +48,8 @@ export const TOOLS: Tool[] = [
   // Background shells (read-only: inspect long-running commands)
   shellOutput,
   listShells,
+  // External integrations (read-only: finds MCP tools, loading them for later calls)
+  findMcpTools,
   // Own history (read-only: what this agent did in this project before)
   listSessionsTool,
   readSessionTool,
@@ -70,6 +74,8 @@ export const TOOLS: Tool[] = [
   rememberRule,
   forbidPath,
   forbidCommand,
+  forbidMcpTool,
+  addMcpServer,
   createSkill,
 ];
 

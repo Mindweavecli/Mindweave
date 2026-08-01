@@ -1,0 +1,62 @@
+/**
+ * types.ts — the one thing every MCP transport has to be.
+ *
+ * MCP runs over a local child process (stdio) or over HTTP (Streamable HTTP). Those are
+ * genuinely different animals: one is a pipe you own the lifecycle of, the other is a
+ * request/response with streaming bodies and no session. Everything above this file
+ * should not care which it got, so the difference stops here.
+ *
+ * Kept to request/notify/close on purpose. MCP's server-to-client traffic used to need
+ * more surface, but 2026-07-28 removed `ping`, removed the HTTP GET channel, and moved
+ * change notifications onto an explicit `subscriptions/listen` stream — so a transport
+ * no longer needs a general inbound-message channel just to stay alive.
+ */
+
+/** A JSON-RPC error surfaced by a transport, carrying the code so callers can classify it. */
+export class RpcError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+    readonly data?: unknown,
+  ) {
+    super(message);
+    this.name = "RpcError";
+  }
+}
+
+/** A server-initiated message: no id, so nothing is waiting on it. */
+export interface Notification {
+  method: string;
+  params?: Record<string, unknown>;
+}
+
+export interface Transport {
+  /** Send a request and resolve with its `result`, or reject with `RpcError`. */
+  request(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  /** Fire-and-forget notification (no id, no reply). */
+  notify(method: string, params?: Record<string, unknown>): void;
+  /** Release the underlying resource. Idempotent. */
+  close(): Promise<void>;
+  /** Resolves when the transport dies on its own (process exit, socket close). */
+  readonly closed: Promise<void>;
+
+  /**
+   * Receive server-initiated messages.
+   *
+   * On stdio these simply arrive on the pipe. On HTTP there is no inbound channel at
+   * all any more — 2026-07-28 deleted the GET endpoint — so they only arrive on the
+   * response stream of a `subscriptions/listen` request, which is why that has to be
+   * opened explicitly rather than being implied by connecting.
+   */
+  onNotification(handler: (notification: Notification) => void): void;
+
+  /**
+   * Open a long-lived request whose response stream stays open, delivering
+   * notifications through `onNotification` until it ends or `close()` is called.
+   * Optional: stdio has no need for it, since its pipe is already long-lived.
+   */
+  openStream?(method: string, params?: Record<string, unknown>): Promise<void>;
+}
+
+/** How long a single request may take before we give up on it. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;

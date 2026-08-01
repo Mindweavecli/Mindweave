@@ -14,8 +14,9 @@
  *  - `read_session` defaults to the NOTES, not the transcript. The notes are the
  *    session's own maintained summary of what it did and where it got to — already
  *    written, already compact, already the thing a human means by "what did we do".
- *    The raw transcript is available but must be asked for, because it is unbounded
- *    and can be enormous.
+ *    When a session kept no notes it falls back to the (clipped) transcript in the
+ *    SAME call rather than asking the model to try again, so one call always answers.
+ *    `full:true` forces the transcript when that is genuinely what's wanted.
  *
  * Read-only, and scoped to THIS project's directory: these read the agent's own
  * saved work and nothing else. Another tool's data stays behind the ask-first gate
@@ -79,9 +80,10 @@ export const readSessionTool: Tool = {
   description:
     "Read what happened in one of your past sessions. By default returns that " +
     "session's maintained notes — its own running summary of the work and where it " +
-    "got to, which is what someone means by 'what did we do'. Pass full:true only if " +
-    "the notes are missing or you genuinely need the raw exchange; transcripts are " +
-    "large. Get ids from list_sessions, or omit `id` for the most recent session.",
+    "got to, which is what someone means by 'what did we do'. If that session kept no " +
+    "notes you get its raw exchange instead, in the same call, so one call always " +
+    "answers. Pass full:true only when you specifically want the raw exchange over the " +
+    "notes. Get ids from list_sessions, or omit `id` for the most recent session.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -123,11 +125,18 @@ export const readSessionTool: Tool = {
 
     const notes = await loadSessionNotes(root, meta.id);
     if (!notes) {
+      // No notes → answer anyway, from the transcript, in THIS call. Telling the model
+      // to come back with full:true bought nothing: it spent an extra round trip to
+      // reach the same clipped transcript we can already return, and a model that reads
+      // "call again" as "that failed" answers from the project files instead — the exact
+      // deflection these tools exist to stop. The render is bounded, so this is safe.
+      const transcript = await loadTranscript(root, meta.id);
+      const body = renderTranscript(transcript ?? []);
       return {
         output:
-          `${header}\n\nThat session kept no notes (it may have been short). Its opening and ` +
-          `closing prompts are above; call read_session with full:true for the raw transcript.`,
-        summary: `session ${short(meta.id)} (no notes)`,
+          `${header}\n\nThat session kept no notes (it may have been short), so this is its ` +
+          `raw exchange instead:\n\n${body}`,
+        summary: `session ${short(meta.id)} (transcript, no notes)`,
       };
     }
     return {

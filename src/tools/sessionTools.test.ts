@@ -20,8 +20,11 @@ const project = mkdtempSync(join(tmpdir(), "mindweave-sessions-"));
 const ctx = (sessionId?: string): ToolContext =>
   ({ cwd: project, roots: [project], reads: new Map(), todos: [], sessionId }) as unknown as ToolContext;
 
-/** Write a saved session the same shape store.ts does: a meta file + notes. */
-async function saveFixture(id: string, opts: { first: string; last: string; updatedAt: number; notes?: string }) {
+/** Write a saved session the same shape store.ts does: a meta file + notes + transcript. */
+async function saveFixture(
+  id: string,
+  opts: { first: string; last: string; updatedAt: number; notes?: string; transcript?: Array<{ role: string; content: string }> },
+) {
   const dir = sessionDir(project);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(
@@ -37,6 +40,9 @@ async function saveFixture(id: string, opts: { first: string; last: string; upda
     }),
   );
   if (opts.notes) await fs.writeFile(join(dir, `${id}.notes.md`), opts.notes);
+  if (opts.transcript) {
+    await fs.writeFile(join(dir, `${id}.jsonl`), opts.transcript.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  }
 }
 
 const NOW = Date.now();
@@ -48,10 +54,17 @@ test("setup: two past sessions on disk", async () => {
     updatedAt: NOW - 2 * 86400_000,
     notes: "Fixed middleware ordering: RequestScoringMiddleware had to run first.",
   });
+  // Deliberately NO notes, but a real transcript: the session that did work and
+  // ended before session memory ever wrote anything.
   await saveFixture("bbbbbbbb-2222", {
     first: "harden the rate limiter",
     last: "does manage.py check pass",
     updatedAt: NOW - 3600_000,
+    transcript: [
+      { role: "user", content: "harden the rate limiter" },
+      { role: "assistant", content: "Added a per-IP token bucket in throttles.py and wired it into settings." },
+      { role: "user", content: "does manage.py check pass" },
+    ],
   });
 });
 
@@ -88,6 +101,16 @@ test("read_session is honest when a session kept no notes", async () => {
   assert.match(r.output, /kept no notes/);
   // It still hands back what it does know, rather than nothing.
   assert.match(r.output, /harden the rate limiter/);
+});
+
+test("a session with no notes still ANSWERS in one call, from its transcript", async () => {
+  const r = await readSessionTool.execute({ id: "bbbbbbbb-2222" }, ctx());
+  assert.equal(r.isError, undefined);
+  // The actual work done that session, not just the bracketing prompts from the header.
+  assert.match(r.output, /per-IP token bucket in throttles\.py/);
+  // And it must NOT bounce the model into a second call: that round trip bought
+  // nothing, and "call again" reads as failure to a model that then guesses instead.
+  assert.doesNotMatch(r.output, /full:true/);
 });
 
 test("read_session rejects an unknown id instead of inventing one", async () => {

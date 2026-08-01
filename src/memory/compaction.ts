@@ -3,8 +3,9 @@
  *
  * A long transcript hurts two ways: the live task gets buried under stale tool
  * output (a coding model "loses its moment" well before any hard context limit —
- * research puts DeepSeek's reliable window around 128K, and attention sags in the
- * middle long before that), and on BYOK every wasted token is the user's money.
+ * multi-needle retrieval, which is what recalling a long session actually is,
+ * sags long before the storage cap), and on BYOK every wasted token is the
+ * user's money. The per-model sharp windows live in the drivers.
  * The cascade, cheapest first:
  *
  *   1. MICROCOMPACT (no model call, lossless): once the transcript passes a low
@@ -24,24 +25,20 @@
  */
 import type { Entry } from "./types.js";
 
-const env = (name: string, fallback: number): number => {
-  const v = Number(process.env[name]);
-  return Number.isFinite(v) && v > 0 ? v : fallback;
-};
-
 // ~3.5 chars/token, deliberately tokenizer-free: triggers need a cheap, stable,
 // slightly-conservative proxy, not an exact count (better to compact a touch
 // early than to overflow).
 const CHARS_PER_TOKEN = 3.5;
 
-// Research-tuned defaults (env-overridable). Anchored to DeepSeek's ~128K sharp
-// window, NOT its 1M storage limit — and pulled in further because an agent
-// degrades from tool-noise dilution before raw retrieval does, and because the
-// user pays per token.
-//   MICRO  ~45K: the onset of noise dilution — clear stale tool bodies (lossless).
-//   AUTO   ~90K: ≈70% of the sharp window — summarize as a backstop.
-export const MICROCOMPACT_TOKENS = env("MINDWEAVE_MICROCOMPACT_TOKENS", 45_000);
-export const AUTOCOMPACT_TOKENS = env("MINDWEAVE_AUTOCOMPACT_TOKENS", 90_000);
+// The BARS themselves live in `dynamo/contextWindow.ts` and are derived from the
+// driver's sharp window, so they move with the model instead of being frozen here.
+// This module used to also export fixed MICROCOMPACT_TOKENS / AUTOCOMPACT_TOKENS
+// constants; nothing read them once the engine went model-anchored, and their
+// doc comment went on asserting 45K/90K while the live bars were 38K/95K. Deleted
+// rather than corrected: a second source of truth for the same number is the
+// stale-claim trap in BOUNDARY.md. The env overrides
+// (MINDWEAVE_MICROCOMPACT_TOKENS / MINDWEAVE_AUTOCOMPACT_TOKENS) are unaffected —
+// the engine reads them directly at the point of use.
 
 /** Tool observations kept verbatim; older ones get their body cleared. Kept deliberately
  *  tight — a weaker model regresses on stale tool noise sooner, so we keep less. */
