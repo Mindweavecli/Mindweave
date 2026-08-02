@@ -45,6 +45,7 @@ import type { Usage } from "../drivers/types.js";
 import type { ShellInfo } from "../tools/backgroundShells.js";
 import type { ConnectionStatus as McpStatus } from "../mcp/connection.js";
 import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig, splitArgs } from "../mcp/configWrite.js";
+import { mapPromptArguments, parsePromptCommand, promptCommand, promptUsage } from "../mcp/prompts.js";
 import type { Entry, Session, SessionMeta } from "../memory/types.js";
 import { DEFAULT_MODE, modeById, nextMode, type ModeId } from "./modes.js";
 
@@ -1075,6 +1076,33 @@ export function App() {
       return;
     }
 
+    // A server prompt invoked as /server:name — render it and run it, exactly like a
+    // skill. Checked after skills so a project's own command always wins over a
+    // third-party server's.
+    const promptRef = parsePromptCommand(name);
+    if (promptRef) {
+      const prompt = s.toolContext.mcp?.findPrompt(promptRef.server, promptRef.name);
+      if (!prompt) {
+        say(`No MCP prompt ${name}. Run /mcp to see which servers are connected.`);
+        return;
+      }
+      const rest = raw.trim().slice(name.length).trim();
+      const { values, missing } = mapPromptArguments(prompt, rest ? rest.split(/\s+/) : []);
+      if (missing.length > 0) {
+        say(`${name} needs ${missing.join(", ")}.\n${promptUsage(prompt)}`);
+        return;
+      }
+      note(`running ${name}…`);
+      const rendered = await s.toolContext.mcp!.renderPrompt(promptRef.server, promptRef.name, values);
+      if (rendered.error) {
+        say(`${name} failed: ${rendered.error}`);
+        return;
+      }
+      s.transcript.push({ role: "user", content: rendered.text });
+      await streamRespond(s);
+      return;
+    }
+
     say(
       `Unknown command ${name}. Try /model, /think, /rules, /skills, /forbidden, /link, /include, /exclude, /shells, /mcp, /context, /undo, /compact or /continue.`,
     );
@@ -1153,12 +1181,15 @@ export function App() {
     void handleSubmit(text);
   }
 
-  // Autocomplete entries: the built-in slash commands plus this project's skills
-  // (read from the live session, so a freshly created skill shows up next render).
+  // Autocomplete entries: the built-in slash commands, this project's skills, and any
+  // prompts the connected MCP servers offer (all read from the live session, so a freshly
+  // created skill — or a server that just finished connecting — shows up next render).
   const skills = session.current?.governance.skills ?? [];
+  const mcpPrompts = session.current?.toolContext.mcp?.promptCatalog() ?? [];
   const completions = [
     ...BASE_COMMANDS,
     ...skills.map((s) => ({ name: `/${s.name}`, description: s.description || "project skill" })),
+    ...mcpPrompts.map((p) => ({ name: promptCommand(p), description: p.description || `prompt from ${p.server}` })),
   ];
 
   // While an overlay is open it replaces the input and owns the keyboard.
@@ -1475,7 +1506,15 @@ export function mcpDetail(server: McpStatus, blocked = 0): string {
   }
   switch (server.state) {
     case "connected": {
-      const tools = `${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}`;
+      // Prompts are counted separately because they are the user's to invoke, not the
+      // model's: a server offering only prompts would otherwise read as "0 tools" and
+      // look broken.
+      const counts = [
+        `${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}`,
+        ...(server.promptCount ? [`${server.promptCount} prompt${server.promptCount === 1 ? "" : "s"}`] : []),
+        ...(server.offersResources ? ["resources"] : []),
+      ];
+      const tools = counts.join(", ");
       // The negotiated revision is worth surfacing: "legacy" is why a server may be
       // missing capabilities, and it is otherwise invisible.
       const proto = server.version ? ` · ${server.version}${server.legacy ? " (legacy)" : ""}` : "";

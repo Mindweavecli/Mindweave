@@ -9,8 +9,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { RpcError } from "./types.js";
-import { StdioTransport, drainLines, frame } from "./stdio.js";
+import { StdioTransport, drainLines, frame, quoteForCmd, windowsCommandLine, windowsNeedsShell } from "./stdio.js";
 
 test("a frame ends with a newline, or the server waits forever", () => {
   assert.equal(frame({ a: 1 }), '{"a":1}\n');
@@ -24,6 +27,53 @@ test("drainLines handles the shapes a pipe actually delivers", () => {
   // Blank lines are noise.
   assert.deepEqual(drainLines("\n\n"), { lines: [], rest: "" });
   assert.deepEqual(drainLines(""), { lines: [], rest: "" });
+});
+
+test("bare launcher names need a shell on Windows, real executables do not", () => {
+  // `npx` is the one that matters: it is how nearly every MCP server in the wild is
+  // configured, it exists only as `npx.cmd`, and `spawn` does not apply PATHEXT.
+  assert.equal(windowsNeedsShell("npx"), true);
+  assert.equal(windowsNeedsShell("npx.cmd"), true);
+  assert.equal(windowsNeedsShell("uvx"), true);
+  assert.equal(windowsNeedsShell("server.bat"), true);
+  assert.equal(windowsNeedsShell("node.exe"), false);
+  assert.equal(windowsNeedsShell(String.raw`C:\Program Files\nodejs\node.exe`), false);
+});
+
+test("cmd quoting keeps an argument with a space in one piece", () => {
+  // The old code joined args with a plain space, so this argument silently became two.
+  assert.equal(quoteForCmd(String.raw`C:\Program Files\x`), '"C:\\Program Files\\x"');
+  assert.equal(quoteForCmd("-y"), "-y");
+  assert.equal(quoteForCmd("@scope/server"), "@scope/server");
+  assert.equal(quoteForCmd(""), '""');
+  assert.equal(quoteForCmd('say "hi"'), '"say ""hi"""');
+  assert.equal(
+    windowsCommandLine("npx", ["-y", "@scope/server", String.raw`C:\Program Files\root`]),
+    'npx -y @scope/server "C:\\Program Files\\root"',
+  );
+});
+
+test("a PATHEXT-only launcher starts and speaks, rather than dying with ENOENT", { skip: process.platform !== "win32" }, async () => {
+  // The regression this guards is the whole Windows story: a server configured the
+  // ordinary way (`"command": "npx"`) could not start at all. Driven through a `.cmd`
+  // shim on PATH so it exercises the real resolution path, not a spelled-out extension.
+  const dir = await fs.mkdtemp(join(tmpdir(), "mindweave-mcp-shim-"));
+  const script = join(dir, "server.js");
+  await fs.writeFile(script, FAKE_SERVER, "utf8");
+  await fs.writeFile(join(dir, "fakemcp.cmd"), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, "utf8");
+
+  const t = new StdioTransport({
+    command: "fakemcp", // no extension, no path — exactly how npx is configured
+    timeoutMs: 10_000,
+    env: { PATH: `${dir};${process.env.PATH ?? ""}` },
+  });
+  try {
+    const result = (await t.request("tools/list")) as { echoed: string };
+    assert.equal(result.echoed, "tools/list");
+  } finally {
+    await t.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 /** A minimal MCP-shaped server: echoes a result, errors on `boom`, prints a banner. */

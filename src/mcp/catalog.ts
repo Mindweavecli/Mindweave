@@ -168,12 +168,81 @@ export function toolSchemas(defs: readonly McpToolDef[], readOnlyOnly = false): 
 }
 
 /**
- * Flatten a `tools/call` result's content blocks into one string plus an error flag.
+ * One block of a `tools/call` result, reduced to the three things we can act on.
  *
- * Non-text blocks are named rather than inlined: an image or an embedded resource is
- * bytes we would be pouring into the prompt to no purpose. Phase 6 routes those to disk
- * and hands back a path; until then, naming the block is the honest placeholder.
+ * MCP defines several block types and more will arrive; collapsing them here means the
+ * dispatch path decides between "text", "bytes" and "a pointer somewhere else" rather
+ * than carrying the protocol's full vocabulary into the manager.
  */
+export type McpContentBlock =
+  | { kind: "text"; text: string }
+  | { kind: "binary"; mime: string; base64: string }
+  | { kind: "link"; uri: string; label: string };
+
+/**
+ * Parse a `tools/call` result into blocks (pure).
+ *
+ * Defensive like every other parse in this file: a server is third-party code, and a
+ * malformed block should cost us that block, not the result.
+ *
+ * Note what an embedded resource does here. A resource carrying `text` becomes text
+ * (tagged with its uri, so the model knows where it came from); one carrying `blob`
+ * becomes bytes. Those are genuinely different things wearing the same block type, and
+ * treating them alike would either stringify base64 into the prompt or throw away a
+ * perfectly readable document.
+ */
+export function parseContentBlocks(result: unknown): { blocks: McpContentBlock[]; isError: boolean } {
+  const r = result as { content?: unknown; isError?: unknown } | null;
+  const raw = Array.isArray(r?.content) ? r.content : [];
+  const blocks: McpContentBlock[] = [];
+
+  for (const item of raw) {
+    const c = item as {
+      type?: unknown;
+      text?: unknown;
+      data?: unknown;
+      mimeType?: unknown;
+      uri?: unknown;
+      name?: unknown;
+      description?: unknown;
+      resource?: { uri?: unknown; text?: unknown; blob?: unknown; mimeType?: unknown };
+    } | null;
+    if (!c || typeof c !== "object") continue;
+    const mime = typeof c.mimeType === "string" ? c.mimeType : "";
+
+    if (typeof c.text === "string" && c.text) {
+      blocks.push({ kind: "text", text: c.text });
+      continue;
+    }
+    if (typeof c.data === "string" && c.data) {
+      blocks.push({ kind: "binary", mime: mime || "application/octet-stream", base64: c.data });
+      continue;
+    }
+    if (c.resource && typeof c.resource === "object") {
+      const uri = typeof c.resource.uri === "string" ? c.resource.uri : "";
+      const resourceMime = typeof c.resource.mimeType === "string" ? c.resource.mimeType : "";
+      if (typeof c.resource.text === "string" && c.resource.text) {
+        blocks.push({ kind: "text", text: uri ? `<resource uri="${uri}">\n${c.resource.text}\n</resource>` : c.resource.text });
+      } else if (typeof c.resource.blob === "string" && c.resource.blob) {
+        blocks.push({ kind: "binary", mime: resourceMime || "application/octet-stream", base64: c.resource.blob });
+      }
+      continue;
+    }
+    if (c.type === "resource_link" && typeof c.uri === "string" && c.uri) {
+      const label = [typeof c.name === "string" ? c.name : "", typeof c.description === "string" ? c.description : ""]
+        .filter(Boolean)
+        .join(" — ");
+      blocks.push({ kind: "link", uri: c.uri, label });
+      continue;
+    }
+    // A block type we do not understand. Name it rather than dropping it silently, so
+    // "the server sent something we ignored" is visible instead of looking like no output.
+    if (typeof c.type === "string" && c.type) blocks.push({ kind: "text", text: `[${c.type} content]` });
+  }
+
+  return { blocks, isError: r?.isError === true };
+}
+
 /**
  * Wrap a server's output so it reads as DATA, not as instruction (pure).
  *
@@ -196,10 +265,19 @@ export function frameUntrusted(server: string, text: string): string {
   );
 }
 
+/**
+ * Flatten a result to plain text, naming anything that is not text (pure).
+ *
+ * The fallback path, used when there is nowhere to spill bytes to. Binary blocks are
+ * DESCRIBED, never inlined: base64 in the prompt is money spent on something the model
+ * cannot look at. `manager.ts` uses the block form instead and writes those to disk.
+ */
 export function flattenContent(result: unknown): { text: string; isError: boolean } {
-  const r = result as { content?: Array<{ type?: string; text?: string }>; isError?: boolean } | null;
-  const parts = Array.isArray(r?.content)
-    ? r.content.map((c) => (typeof c?.text === "string" ? c.text : c?.type ? `[${c.type} content]` : "")).filter(Boolean)
-    : [];
-  return { text: parts.join("\n") || "(no output)", isError: r?.isError === true };
+  const { blocks, isError } = parseContentBlocks(result);
+  const parts = blocks.map((b) => {
+    if (b.kind === "text") return b.text;
+    if (b.kind === "link") return `[resource: ${b.uri}${b.label ? ` — ${b.label}` : ""}]`;
+    return `[${b.mime} content, not stored]`;
+  });
+  return { text: parts.join("\n") || "(no output)", isError };
 }

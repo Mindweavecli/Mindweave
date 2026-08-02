@@ -53,13 +53,20 @@ export async function reloadProjectMemory(session: Session): Promise<void> {
  * rather than exceptions, so nothing here can reject; the `catch` is belt and braces.
  *
  * The cost of not awaiting is that a server landing mid-session changes the tool list
- * and invalidates the cached prompt prefix. That is known and priced (docs/mcp-plan.md
- * §6) and is fixed in Phase 3 by rendering MCP schemas into the volatile tail, which is
- * the right fix regardless of when servers connect, so the fast start is kept.
+ * and invalidates the cached prompt prefix. That cost is real and it is NOT designed
+ * away: tool schemas are a structural API field rendered before every provider's cache
+ * breakpoint, so there is no volatile tail to move them into (docs/mcp-plan.md §6, which
+ * corrects an earlier claim that there was). What Phase 3 actually bought is a stable
+ * catalog and one frozen snapshot per turn, so the cost lands once per real change
+ * instead of once per turn — which is cheap enough that the fast start is worth keeping.
  */
 function attachMcp(ctx: ToolContext, cwd: string): void {
   const manager = new McpManager();
   ctx.mcp = manager;
+  // Before anything connects: a tool can be dispatched as soon as its server is up, and
+  // spilled results have to land in this project's state dir rather than wherever the
+  // process happened to start.
+  manager.setProjectRoot(cwd);
   void loadMcpConfig(cwd)
     .then(async (configs) => {
       await manager.start(configs);

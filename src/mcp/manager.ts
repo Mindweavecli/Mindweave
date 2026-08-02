@@ -22,17 +22,22 @@
 import type { Tool, ToolResult, ToolSchema } from "../tools/types.js";
 import {
   estimateCatalogTokens,
-  flattenContent,
   frameUntrusted,
   mcpToolName,
+  normalizeServerName,
+  parseContentBlocks,
   parseMcpToolName,
   sortCatalog,
   toolSchemas as schemasFor,
+  type McpContentBlock,
   type McpToolDef,
 } from "./catalog.js";
+import { binaryPointer, isOversized, oversizedPointer, spill, sweepOldResults } from "./resultStore.js";
+import { renderPromptMessages, type McpPrompt } from "./prompts.js";
+import { sortResources, type McpResource, type McpResourceTemplate } from "./resources.js";
 import { McpConnection, type ConnectionStatus } from "./connection.js";
 import { searchCatalog, shouldDefer } from "./deferred.js";
-import { compareTrust, acceptTools, changedToolsQuestion, type TrustRecord } from "./trust.js";
+import { compareTrust, acceptTools, changedToolsQuestion, fingerprintCatalog, type TrustRecord } from "./trust.js";
 import { loadTrust, saveTrust } from "./trustStore.js";
 import type { McpServerConfig } from "./config.js";
 
@@ -67,7 +72,7 @@ export interface McpSnapshot {
  * Wrap one MCP tool def as a runnable Tool. Shared by the live lookup and the per-turn
  * snapshot so both dispatch through exactly the same path.
  */
-function buildTool(name: string, def: McpToolDef, connection: McpConnection): Tool {
+function buildTool(name: string, def: McpToolDef, connection: McpConnection, spillRoot: () => string): Tool {
   return {
     name,
     description: def.description,
@@ -76,7 +81,8 @@ function buildTool(name: string, def: McpToolDef, connection: McpConnection): To
     async execute(args): Promise<ToolResult> {
       try {
         const result = await connection.callTool(def.name, args);
-        const { text, isError } = flattenContent(result);
+        const { blocks, isError } = parseContentBlocks(result);
+        const text = await renderBlocks(blocks, def, spillRoot());
         // Framed as data, not instruction: this text is written by a third party and
         // lands where the model trusts built-in tool output.
         return { output: frameUntrusted(def.server, text), summary: name, ...(isError ? { isError: true } : {}) };
@@ -93,6 +99,43 @@ function buildTool(name: string, def: McpToolDef, connection: McpConnection): To
       }
     },
   };
+}
+
+/**
+ * Turn a result's blocks into the text the model receives, spilling what does not belong
+ * in a prompt.
+ *
+ * Two things go to disk. BYTES always: an image or a blob is base64 the model cannot
+ * look at, and inlining it is money spent on noise. OVERSIZED TEXT past the cap: the
+ * model gets the head plus the path, which beats a bare truncation because nothing is
+ * actually lost — it can read or grep the file for the part it needs.
+ *
+ * Failing to write is not fatal. The pointer falls back to naming the content, which is
+ * what the old code did for everything, so the worst case is the previous behaviour.
+ */
+async function renderBlocks(blocks: readonly McpContentBlock[], def: { server: string; name: string }, root: string): Promise<string> {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.kind === "text") {
+      parts.push(block.text);
+      continue;
+    }
+    if (block.kind === "link") {
+      // A link is already a pointer; it costs nothing and read_mcp_resource can follow it.
+      parts.push(`[resource: ${block.uri}${block.label ? ` — ${block.label}` : ""}]`);
+      continue;
+    }
+    const bytes = Buffer.from(block.base64, "base64");
+    const path = await spill(root, def.server, def.name, block.mime, bytes);
+    parts.push(path ? binaryPointer(block.mime, bytes.byteLength, path) : `[${block.mime} content, ${bytes.byteLength} bytes, could not be saved]`);
+  }
+
+  const text = parts.join("\n") || "(no output)";
+  if (!isOversized(text)) return text;
+  const path = await spill(root, def.server, def.name, "text/plain", text);
+  // With nowhere to put it we still must not hand over the whole thing — an unbounded
+  // result is the failure this exists to prevent.
+  return path ? oversizedPointer(text, path) : oversizedPointer(text, "(could not be saved to disk)");
 }
 
 /** The two answers to a changed-description prompt. */
@@ -127,8 +170,23 @@ export class McpManager {
    * problem for finished shells.
    */
   private notices: string[] = [];
-  /** The project root, remembered from the trust check so a later review can re-save. */
+  /**
+   * The project this pool belongs to: where the trust record is read and written, and
+   * where oversized results are spilled. Set as early as the session knows it, so a
+   * dispatch that beats the (async, queued) trust check still spills to the right place.
+   */
   private trustCwd = "";
+  /**
+   * Serializes every piece of trust work.
+   *
+   * The initial verification and a notification-driven recheck can otherwise interleave:
+   * both read the record, both write it, and the second write loses whatever the first
+   * decided. A chain is enough — this is rare, cheap work, and correctness matters more
+   * than concurrency.
+   */
+  private trustQueue: Promise<void> = Promise.resolve();
+  /** Fingerprints as of the last check, so an unchanged catalog costs nothing. */
+  private trustSignature = "";
 
   /**
    * Told whenever any server's state or catalog moves, so the CLI can repaint.
@@ -139,7 +197,26 @@ export class McpManager {
    */
   setOnChange(handler: (() => void) | null): void {
     this.onChange = handler;
-    for (const connection of this.connections.values()) connection.setOnChange(handler ? () => this.onChange?.() : null);
+    // Our own handler stays attached even when the UI detaches: it carries the trust
+    // recheck, which is a safety gate and not a rendering concern.
+    for (const connection of this.connections.values()) connection.setOnChange(() => this.onConnectionChange());
+  }
+
+  /**
+   * Tell the pool which project it serves, before anything connects.
+   *
+   * Also the moment to clear out stale spilled results: they are scratch, this runs once
+   * per session, and sweeping here keeps the mechanism free of any background timer.
+   */
+  setProjectRoot(cwd: string): void {
+    this.trustCwd = cwd;
+    void sweepOldResults(cwd).catch(() => {});
+  }
+
+  /** Where spilled results go. Falls back to the process cwd in bare contexts (tests),
+   *  which is the same directory the rest of the tool layer defaults to. */
+  private spillRoot(): string {
+    return this.trustCwd || process.cwd();
   }
 
   /** Bring up every configured server. Never rejects: failures become states. */
@@ -152,7 +229,7 @@ export class McpManager {
 
     for (const config of configs) {
       const connection = new McpConnection(config);
-      connection.setOnChange(() => this.onChange?.());
+      connection.setOnChange(() => this.onConnectionChange());
       this.connections.set(config.name, connection);
     }
 
@@ -185,10 +262,18 @@ export class McpManager {
    * decision: with no approval channel to ask through, changed tools stay blocked.
    */
   async verifyTrust(cwd: string, ask?: (question: string, options: string[]) => Promise<string>): Promise<void> {
+    this.trustQueue = this.trustQueue.then(() => this.doVerifyTrust(cwd, ask)).catch(() => {});
+    return this.trustQueue;
+  }
+
+  private async doVerifyTrust(cwd: string, ask?: (question: string, options: string[]) => Promise<string>): Promise<void> {
     const defs = this.catalog();
-    if (defs.length === 0) return;
+    // Remember the root even with nothing to check: a server can connect later, and the
+    // recheck below is inert until it knows where the record lives.
     this.trustCwd = cwd;
+    if (defs.length === 0) return;
     this.trust = await loadTrust(cwd);
+    this.trustSignature = JSON.stringify(fingerprintCatalog(defs));
     const verdict = compareTrust(defs, this.trust);
 
     // First sight is trusted by construction — there is nothing to compare against.
@@ -219,6 +304,59 @@ export class McpManager {
     }
 
     if (verdict.fresh.length > 0 || verdict.changed.length > 0) await saveTrust(cwd, this.trust);
+  }
+
+  /**
+   * Re-verify after the catalog moves UNDERNEATH us, mid-session.
+   *
+   * This closes the hole the startup check left wide open. `trust.ts` names the rug pull
+   * as its whole reason to exist — "a clean server ships an update that poisons a
+   * description, and clients reload it silently" — and that is exactly what we did: a
+   * `notifications/tools/list_changed` refreshed the catalog and nothing compared the new
+   * descriptions against anything. A server therefore only had to connect clean and then
+   * announce a change to walk straight past a check built to stop it.
+   *
+   * It QUARANTINES rather than asking. The trigger arrives whenever the server feels like
+   * it, quite possibly mid-turn, and interrupting a running turn with a security question
+   * is both jarring and racy. Blocking is the safe direction, the notice says what
+   * happened, and `/mcp` already knows how to hand the question back.
+   */
+  private async recheckTrust(): Promise<void> {
+    // Before the startup check has run there is no baseline to compare against, and
+    // treating everything as fresh here would record fingerprints we never verified.
+    if (!this.trustCwd) return;
+    const defs = this.catalog();
+    if (defs.length === 0) return;
+    const signature = JSON.stringify(fingerprintCatalog(defs));
+    if (signature === this.trustSignature) return; // nothing moved; the common case
+    this.trustSignature = signature;
+
+    const verdict = compareTrust(defs, this.trust);
+    if (verdict.fresh.length === 0 && verdict.changed.length === 0) return;
+    // A server that GAINS a tool is trusted on first sight, exactly as at startup —
+    // otherwise every ordinary server upgrade would look like an attack.
+    if (verdict.fresh.length > 0) this.trust = acceptTools(this.trust, defs, verdict.fresh);
+    if (verdict.changed.length > 0) {
+      for (const name of verdict.changed) this.quarantined.add(name);
+      this.notices.push(
+        `An MCP server changed ${verdict.changed.length} tool description${verdict.changed.length === 1 ? "" : "s"} ` +
+          `while this session was running: ${verdict.changed.join(", ")}. ` +
+          `Blocked for now — run /mcp to review.`,
+      );
+    }
+    await saveTrust(this.trustCwd, this.trust);
+    this.onChange?.();
+  }
+
+  /**
+   * A server's state or catalog moved. Repaint, and check what moved.
+   *
+   * One handler for both so a catalog refresh can never reach the model without passing
+   * the trust gate — the previous wiring repainted and nothing else.
+   */
+  private onConnectionChange(): void {
+    this.trustQueue = this.trustQueue.then(() => this.recheckTrust()).catch(() => {});
+    this.onChange?.();
   }
 
   /**
@@ -283,7 +421,7 @@ export class McpManager {
     if (previous) await previous.close().catch(() => {});
 
     const connection = new McpConnection(config);
-    connection.setOnChange(() => this.onChange?.());
+    connection.setOnChange(() => this.onConnectionChange());
     this.connections.set(config.name, connection);
     if (!config.disabled) await connection.connect().catch(() => {});
     // A re-added server is a different server as far as trust goes; drop any stale
@@ -291,8 +429,101 @@ export class McpManager {
     for (const name of this.activatedNames()) {
       if (name.startsWith(mcpToolName(config.name, ""))) this.activated.delete(name);
     }
-    this.onChange?.();
+    // Fingerprint what it brought. Without this a server added mid-session was never
+    // recorded at all, so its very first descriptions became the baseline only on the
+    // NEXT session — and anything it changed in between went unnoticed.
+    this.onConnectionChange();
     return connection.status();
+  }
+
+  /**
+   * Every prompt every connected server offers, as slash commands.
+   *
+   * Synchronous because the CLI reads it while rendering the completion menu — a
+   * keystroke cannot wait on a round trip, which is why prompts are fetched at connect.
+   */
+  promptCatalog(): McpPrompt[] {
+    return [...this.connections.values()]
+      .filter((c) => c.isConnected())
+      .flatMap((c) => [...c.prompts()])
+      .sort((a, b) => a.server.localeCompare(b.server) || a.name.localeCompare(b.name));
+  }
+
+  /** Look up one prompt by its server and name. */
+  findPrompt(server: string, name: string): McpPrompt | undefined {
+    return this.promptCatalog().find((p) => p.server === server && p.name === name);
+  }
+
+  /**
+   * Render a prompt into the text of a user turn.
+   *
+   * Errors are returned rather than thrown: the caller is a slash command, and the user
+   * needs to be told what went wrong in the chat, not shown a stack.
+   */
+  async renderPrompt(server: string, name: string, args: Record<string, string>): Promise<{ text: string; error?: string }> {
+    const connection = this.connectionFor(server);
+    if (!connection) return { text: "", error: `MCP server '${server}' is not connected.` };
+    try {
+      const rendered = renderPromptMessages(await connection.getPrompt(name, args));
+      if (!rendered) return { text: "", error: `'${server}:${name}' returned nothing to run.` };
+      return { text: rendered };
+    } catch (error) {
+      return { text: "", error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * List resources across every connected server, or one of them.
+   *
+   * Fetches on demand rather than at connect: most projects never touch resources, and
+   * two extra round trips per server would be paid by every session to serve the few
+   * that do. The per-connection TTL keeps a model that lists twice in one turn from
+   * paying twice.
+   */
+  async listResources(server?: string): Promise<{ resources: McpResource[]; templates: McpResourceTemplate[]; servers: number }> {
+    const connections = [...this.connections.values()].filter(
+      (c) => c.isConnected() && c.offersResources() && (!server || matchesServer(c.config.name, server)),
+    );
+    await Promise.all(connections.map((c) => c.loadResources().catch(() => {})));
+    return {
+      resources: sortResources(connections.flatMap((c) => [...c.resources()])),
+      templates: connections.flatMap((c) => [...c.resourceTemplates()]),
+      servers: connections.length,
+    };
+  }
+
+  /**
+   * Read one resource, spilling it to disk if it is large or binary.
+   *
+   * Same treatment as a tool result, for the same reason: a resource is content chosen
+   * by a third party, and "read the schema" should not be able to swallow a turn.
+   */
+  async readResource(server: string, uri: string): Promise<{ text: string; isError: boolean }> {
+    const connection = this.connectionFor(server);
+    if (!connection) {
+      return { text: `No connected MCP server named '${server}'.`, isError: true };
+    }
+    try {
+      const blocks = await connection.readResource(uri);
+      if (blocks.length === 0) return { text: `'${uri}' returned no content.`, isError: false };
+      const body = await renderBlocks(blocks, { server, name: resourceLabel(uri) }, this.spillRoot());
+      return { text: frameUntrusted(server, body), isError: false };
+    } catch (error) {
+      return { text: `Could not read '${uri}': ${error instanceof Error ? error.message : String(error)}`, isError: true };
+    }
+  }
+
+  /** Which servers advertise resources at all, for a useful empty-state message. */
+  resourceServers(): string[] {
+    return [...this.connections.values()]
+      .filter((c) => c.isConnected() && c.offersResources())
+      .map((c) => c.config.name)
+      .sort();
+  }
+
+  /** Resolve a server by its config name, tolerating the normalized form the model sees. */
+  private connectionFor(server: string): McpConnection | undefined {
+    return [...this.connections.values()].find((c) => c.isConnected() && matchesServer(c.config.name, server));
   }
 
   /** Every server's state, for `/mcp` and for diagnostics. */
@@ -353,7 +584,7 @@ export class McpManager {
         const def = defs.find((d) => mcpToolName(d.server, d.name) === name);
         const connection = owners.get(name);
         if (!def || !connection) return undefined;
-        return buildTool(name, def, connection);
+        return buildTool(name, def, connection, () => this.spillRoot());
       },
     };
   }
@@ -439,7 +670,7 @@ export class McpManager {
       (c) => c.isConnected() && mcpToolName(c.config.name, "x") === mcpToolName(parsed.server, "x"),
     );
     if (!connection) return undefined;
-    return buildTool(name, def, connection);
+    return buildTool(name, def, connection, () => this.spillRoot());
   }
 
   async dispose(): Promise<void> {
@@ -448,6 +679,24 @@ export class McpManager {
     live.delete(this);
     await Promise.all(closing);
   }
+}
+
+/**
+ * Does this config name refer to the server the model named?
+ *
+ * The model only ever sees NORMALIZED names (`acme_tools` for a server configured as
+ * `acme.tools`), because that is what survives being embedded in a tool name. So a
+ * resource or prompt call naming its server has to be matched through the same
+ * normalization, or every server with a dot in its name becomes unreachable.
+ */
+function matchesServer(configName: string, requested: string): boolean {
+  return configName === requested || normalizeServerName(configName) === normalizeServerName(requested);
+}
+
+/** A short, filename-ish label for a resource URI, used when spilling it to disk. */
+function resourceLabel(uri: string): string {
+  const tail = uri.split(/[/?#]/).filter(Boolean).pop() ?? "resource";
+  return tail.slice(0, 32);
 }
 
 /** Kill any servers still running when the process exits. Child processes do not die

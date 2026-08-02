@@ -29,6 +29,7 @@ import { shellOutput, killShell, listShells } from "./shellTools.js";
 import { spawnSubagent } from "./subagent.js";
 import { listSessionsTool, readSessionTool } from "./sessionTools.js";
 import { findMcpTools } from "./mcpSearch.js";
+import { listMcpResources, readMcpResource } from "./mcpResources.js";
 import { addMcpServer } from "./mcpAdd.js";
 
 export const TOOLS: Tool[] = [
@@ -48,8 +49,11 @@ export const TOOLS: Tool[] = [
   // Background shells (read-only: inspect long-running commands)
   shellOutput,
   listShells,
-  // External integrations (read-only: finds MCP tools, loading them for later calls)
+  // External integrations (read-only: finds MCP tools, and reads the DATA servers expose
+  // as opposed to the actions they perform)
   findMcpTools,
+  listMcpResources,
+  readMcpResource,
   // Own history (read-only: what this agent did in this project before)
   listSessionsTool,
   readSessionTool,

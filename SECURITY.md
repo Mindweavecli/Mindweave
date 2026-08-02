@@ -41,12 +41,14 @@ An MCP server is third-party code you pointed MindWeave at, and its tool descrip
 What MindWeave does about it:
 
 - **Descriptions and schemas are fingerprinted.** Every tool is hashed on first sight and the record is kept per project. If a description or its parameter schema moves, the tool is **blocked** and you are asked, with the change named. Decline and it stays blocked, and the old fingerprint is kept so you are asked again next session rather than the change being silently accepted. With no way to ask, it fails closed.
+- **The check runs again whenever a catalog moves, not only at startup.** A server can announce a changed tool list at any moment, and until v1.3.1 those new descriptions were reloaded without being compared to anything, which left the rug pull open in the one case the fingerprints existed to cover. A mid-session change now blocks the affected tools and tells you, rather than interrupting a running turn with a prompt.
+- **A server cannot flood the context.** Tool results and resources over a size ceiling, and anything binary, are written to a file in the project's state directory. The model gets the beginning plus a path, so a large payload costs a few hundred tokens instead of a turn.
 - **Server output is framed as data.** Results come back inside a delimited block marked as external content to reason about, never as instructions to follow.
 - **Descriptions are length-capped** before they reach the prompt, which bounds what one server can inject or cost you.
-- **`forbid_mcp_tool <name>`** bans a single tool across sessions without disabling the rest of its server. It is removed from every path — advertised list, search, activation, and dispatch — not just the obvious one.
+- **`forbid_mcp_tool <name>`** bans a single tool across sessions without disabling the rest of its server. It is removed from every path: advertised list, search, activation, and dispatch, not just the obvious one.
 - **A failing or hostile server cannot take the session down.** Connection failures become states, not exceptions.
 
-What this is **not**: verification that a server is trustworthy. **A server that is malicious the first time you connect passes every check above.** First sight is trusted by construction — there is no signature to check and no reputation to consult. This catches *change*, not badness. No MCP client currently solves the day-one case, so treat adding an MCP server with the same care as installing a dependency: read what it is before you point at it.
+What this is **not**: verification that a server is trustworthy. **A server that is malicious the first time you connect passes every check above.** First sight is trusted by construction, since there is no signature to check and no reputation to consult. This catches *change*, not badness. No MCP client currently solves the day-one case, so treat adding an MCP server with the same care as installing a dependency: read what it is before you point at it.
 
 ## Your key
 

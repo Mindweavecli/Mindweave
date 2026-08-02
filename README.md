@@ -14,13 +14,29 @@
 
 ## What is MindWeave?
 
-MindWeave is a coding agent that lives in your terminal and works directly inside your repository — reading, searching, editing, running commands, and verifying its own work. It runs **entirely on your machine**: your code and your API key never touch a MindWeave server.
+MindWeave is a coding agent that lives in your terminal and works directly inside your repository, reading, searching, editing, running commands, and verifying its own work. It runs **entirely on your machine**: your code and your API key never touch a MindWeave server.
 
 It's built lean on purpose. Instead of burning your context budget on heavy scaffolding, MindWeave keeps prompts thin and leaves the model room to actually reason about your code.
 
-## v1.3 is out: MCP
+## v1.3.1: MCP, sharpened
 
-MindWeave speaks the **Model Context Protocol**, so external tool servers — GitHub, Postgres, your company's internal API — become tools the agent can use directly.
+v1.3 shipped MCP. v1.3.1 is what running it turned up, plus the two pieces of the protocol it didn't cover yet.
+
+**Windows could not start most MCP servers.** `spawn` on Windows doesn't resolve a bare command name through PATHEXT, and the transport only used a shell when the command literally ended in `.cmd`. So `{"command": "npx", ...}`, which is how almost every MCP server on earth is configured, failed with `spawn npx ENOENT`. It now resolves properly, and a server that gets shut down has its whole process tree killed instead of just the shell wrapping it, so nothing is left running after you quit.
+
+**The rug pull check only ran at startup.** Tool descriptions were fingerprinted when a server connected, and never again. A server could therefore connect clean, pass the check, then announce a changed tool list and have new descriptions loaded straight into the model's prompt unexamined. That is the exact attack the check exists to stop. Every catalog change is now verified, and anything that moved is blocked with a notice until you review it in `/mcp`.
+
+**One server could swallow a whole turn.** There was no ceiling on the size of a tool result, so a server answering with a large payload put all of it in the model's context, and an image went in as base64 nobody can read. Oversized and binary results are now saved to a file, and the model gets the first part plus the path, so nothing is lost and the turn survives.
+
+**Resources.** Servers expose data as well as actions: a database schema, a runbook, a log. The agent can now list and read those, including URI templates it fills in itself. They are fetched only when it goes looking, and they never enter the tool list, so a server with a thousand resources costs nothing until it is used.
+
+**Prompts as slash commands.** A server can ship its own commands, and they appear alongside your project's skills. Type `/github:review 4821 focus on the migration` and the server writes the instructions.
+
+**Next up:** OAuth, for remote servers that need a login.
+
+## v1.3: MCP
+
+MindWeave speaks the **Model Context Protocol**, so external tool servers (GitHub, Postgres, your company's internal API) become tools the agent can use directly.
 
 **You don't start anything.** Add a server once and MindWeave spawns and manages it for you, every session, in the background:
 
@@ -29,24 +45,22 @@ MindWeave speaks the **Model Context Protocol**, so external tool servers — Gi
 /mcp add --http internal https://tools.acme.dev/mcp
 ```
 
-Or just say it — "add the github mcp server, my token's in GITHUB_TOKEN" — and the agent writes the config after asking you to confirm. Either way the server connects immediately and its tools are usable in the same turn. `/mcp` shows what's running, which protocol each server negotiated, and reconnects anything that's down.
+Or just say it: "add the github mcp server, my token's in GITHUB_TOKEN". The agent then writes the config after asking you to confirm. Either way the server connects immediately and its tools are usable in the same turn. `/mcp` shows what's running, which protocol each server negotiated, and reconnects anything that's down.
 
 **It targets the current protocol, not last year's.** The 2026-07-28 revision made MCP stateless: no handshake, no session id, no SSE resumability, and a new `server/discover` call. Almost every server in the wild still speaks an older revision, so MindWeave probes and speaks whichever one a server actually knows. Both stdio and Streamable HTTP work. A server that crashes is revived automatically, up to a point, and then says so rather than retrying forever.
 
 **A big catalog doesn't drown the model.** Past 25 tools, servers' tools are held back and the agent searches for what it needs instead. This is about accuracy before cost: a model choosing among 300 tools chooses worse than one choosing among 40, however much context is free.
 
-**Server tool descriptions are treated as untrusted, because they are.** A description goes straight into the model's prompt and is read as instruction, which makes it an injection surface. MindWeave fingerprints every tool's description and schema, and if one changes it blocks the tool and asks you before letting it run again — that's the "rug pull" attack, where a server you trust ships a poisoned update. Server output is delimited as data rather than instruction, and `forbid_mcp_tool` bans a single tool without disabling its server. What this does *not* do is verify a server is safe to begin with; [SECURITY.md](SECURITY.md) is explicit about that.
+**Server tool descriptions are treated as untrusted, because they are.** A description goes straight into the model's prompt and is read as instruction, which makes it an injection surface. MindWeave fingerprints every tool's description and schema, and if one changes it blocks the tool and asks you before letting it run again. That's the "rug pull" attack, where a server you trust ships a poisoned update. Server output is delimited as data rather than instruction, and `forbid_mcp_tool` bans a single tool without disabling its server. What this does *not* do is verify a server is safe to begin with; [SECURITY.md](SECURITY.md) is explicit about that.
 
 **Also in this release.** DeepSeek's usable context window was set far too conservatively (128K against a real 1M) and ignored which model you were on, so long sessions compacted much earlier than they needed to. V4-Pro now runs to 256K and V4-Flash to 192K, anchored to where multi-needle retrieval actually holds up rather than to a round number. Short sessions now write notes too, so asking about a brief one no longer falls back to re-reading its whole transcript.
-
-**Next up:** MCP resources and prompts, then OAuth for remote servers that need it.
 
 ## Features
 
 - **Fully local & BYOK.** Bring your own model API key. No backend, no telemetry, no lock-in.
-- **Model-adaptive drivers.** Each model family gets its own driver so it runs at its best — without bloating the core. Only the driver you're using is ever loaded.
+- **Model-adaptive drivers.** Each model family gets its own driver so it runs at its best without bloating the core. Only the driver you're using is ever loaded.
 - **Deterministic code intelligence.** A background lane indexes your repo with tree-sitter and language servers (no tokens, no cost) so the agent understands your codebase, not just the open file.
-- **Real tools.** File read/edit, multi-file edits, ripgrep search, shell with background jobs, sub-agents, and diagnostics — with read-before-edit safety and an undo net.
+- **Real tools.** File read/edit, multi-file edits, ripgrep search, shell with background jobs, sub-agents, and diagnostics, with read-before-edit safety and an undo net.
 - **Session memory.** Long sessions stay sharp: automatic compaction plus a continuously-maintained state summary that survives it. The agent can also read its own earlier sessions in a project, so "what did we do last time" gets a real answer.
 - **MCP servers.** Connect external tool servers (GitHub, Postgres, your own) with `/mcp add` or just by asking. They start with your session, and their tools are treated as untrusted by default.
 - **Per-project governor.** Give a project standing rules, reusable skills, and forbidden paths/commands that the agent must respect.
@@ -56,9 +70,9 @@ Or just say it — "add the github mcp server, my token's in GITHUB_TOKEN" — a
 
 - **Node.js 20+**
 - A model API key (see below)
-- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) for faster search — MindWeave falls back to a built-in walker if it's not installed.
+- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) for faster search. MindWeave falls back to a built-in walker if it's not installed.
 
-> **Platforms:** MindWeave is developed and tested primarily on **Windows**. It's built on cross-platform Node and should run on macOS and Linux — if you hit a platform issue there, please open an issue.
+> **Platforms:** MindWeave is developed and tested primarily on **Windows**. It's built on cross-platform Node and should run on macOS and Linux. If you hit a platform issue there, please open an issue.
 
 ## Install
 
@@ -94,8 +108,8 @@ You only need the key for the provider whose models you use. Set both and you ca
 
 ## Choosing a model
 
-- `/model` — pick which model answers.
-- `/think` — pick how hard it reasons.
+- `/model` picks which model answers.
+- `/think` picks how hard it reasons.
 
 Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/drivers/PROVIDERS.md) for the current model list, and [`src/drivers/README.md`](src/drivers/README.md) if you want to build a driver for another model.
 
@@ -124,7 +138,7 @@ You can also just ask: *"add the github mcp server, my token's in GITHUB_TOKEN."
 
 Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mcp.json` (everywhere), in the same format every other MCP client uses, so an existing config can be pasted straight in.
 
-**Two things worth knowing.** If a server's tool description changes between sessions, that tool is blocked until you approve it — a changed description is the main way a trusted server turns hostile. And remote servers requiring OAuth aren't supported yet; they'll show as `needs-auth`.
+**Two things worth knowing.** If a server's tool description changes between sessions, that tool is blocked until you approve it, because a changed description is the main way a trusted server turns hostile. And remote servers requiring OAuth aren't supported yet; they'll show as `needs-auth`.
 
 ## Roadmap
 
@@ -134,13 +148,14 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 - [x] Deterministic code intelligence (tree-sitter + language servers)
 - [x] Per-project governor (rules / skills / forbidden)
 - [x] DeepSeek driver
-- [x] **v1.0 — first public release**
+- [x] **v1.0: first public release**
 - [x] **v1.1: Anthropic (Claude) driver, providers loaded on demand, provider-aware setup, cut off replies caught**
 - [x] **v1.1.2: shared core made provider-neutral, with tests guarding it**
 - [x] **v1.2: reads its own past sessions, failure loops interrupt instead of stopping dead, every early stop explains itself**
 - [x] **v1.3: MCP / external tool servers, with rug-pull protection and a deferred tool pool**
-- [ ] **v1.4: MCP resources & prompts, OAuth for remote servers** — the next release
-- [ ] More model drivers (OpenAI, Qwen, Ollama, …) — community-built
+- [x] **v1.3.1: MCP hardening, plus resources and server prompts**
+- [ ] **v1.4: OAuth for remote servers**, the next release
+- [ ] More model drivers (OpenAI, Qwen, Ollama, …), community-built
 - [ ] Verified macOS / Linux support
 
 ## Found a bug?
@@ -157,7 +172,7 @@ Especially worth reporting:
 
 ## Contributing
 
-MindWeave is open source and contributions are welcome — especially **model drivers**. See the [Contributing Guide](CONTRIBUTING.md), and open an issue or a Discussion to claim a provider.
+MindWeave is open source and contributions are welcome, especially **model drivers**. See the [Contributing Guide](CONTRIBUTING.md), and open an issue or a Discussion to claim a provider.
 
 Small fixes and reproduced bugs with a failing test can go straight to a pull request. For anything larger, start a Discussion first: the core is deliberately close to finished, and the guide explains what that means for scope before you spend an afternoon on it.
 

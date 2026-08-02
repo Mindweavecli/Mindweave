@@ -73,11 +73,11 @@ A word on scope, so nobody wastes an afternoon: **the core is deliberately close
 
 ### What we are working on next
 
-MCP shipped in v1.3. What remains of it, and what v1.4 is about:
+MCP shipped in v1.3, and v1.3.1 added resources, server prompts and result spilling. What remains, and what v1.4 is about:
 
-* **MCP resources and prompts.** Servers can expose readable resources and prompt templates; only tools are wired up today.
-* **OAuth for remote servers.** Servers needing authorization currently report `needs-auth` and stop there. This is the largest remaining piece and the hardest to verify, since it needs a real identity provider to test against — if you run one, that help is worth more than the code.
-* **Large and binary tool results.** An oversized result still goes into the context rather than to disk.
+* **OAuth for remote servers.** Servers needing authorization currently report `needs-auth` and stop there. This is the largest remaining piece and the hardest to verify, since it needs a real identity provider to test against. If you run one, that help is worth more than the code.
+* **Multi-round tool requests and elicitation.** A server that needs extra input mid-call cannot ask for it yet.
+* **Resources in the prompt box.** Resources are reachable by the agent but there is no way to attach one yourself with `@`.
 
 If that is where you want to help, say so in Discussions before writing code so the work does not collide.
 
@@ -94,7 +94,7 @@ The same goes for **macOS and Linux**. Development happens on Windows. Both are 
 3. Test your changes locally to ensure no regressions: `npm test` and `npm run build` must both be clean.
 4. Submit your PR against the main branch with a clear description of the changes made and why.
 
-**If you are fixing a bug, add a test that fails without your fix.** Then check that it does — revert the fix, watch the test go red, and put it back. A test that passes either way is worse than no test, because it makes the next person believe the case is covered. Several guards in this repo exist specifically because a bug could not fail loudly, and those are the ones worth getting right.
+**If you are fixing a bug, add a test that fails without your fix.** Then check that it does: revert the fix, watch the test go red, and put it back. A test that passes either way is worse than no test, because it makes the next person believe the case is covered. Several guards in this repo exist specifically because a bug could not fail loudly, and those are the ones worth getting right.
 
 ---
 

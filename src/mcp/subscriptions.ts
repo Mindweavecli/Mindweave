@@ -26,18 +26,26 @@ export const TOOLS_CHANGED = "notifications/tools/list_changed";
 /**
  * Which change types to request from a server (pure).
  *
- * Only `toolsListChanged`, and only when the server actually advertises tools. Prompts
- * and resources arrive in Phase 6 and subscribing to them now would mean accepting
- * notifications with nothing to do about them. A server with no tools gets no
- * subscription at all rather than an empty one, because an empty `subscriptions/listen`
- * still costs a held-open stream.
+ * Only what we can act on, and only where the server says the list can move. All three
+ * are actionable now: a changed tool list rebuilds the catalog (and re-runs the trust
+ * check), a changed prompt list rebuilds the slash commands, and a changed resource list
+ * invalidates a cached listing. `resourceSubscriptions` is still not requested — that is
+ * per-resource content watching, which nothing in the agent consumes.
+ *
+ * A server that advertises none of them gets no subscription at all rather than an empty
+ * one, because an empty `subscriptions/listen` still costs a held-open stream.
  */
 export function subscriptionsFor(capabilities: Record<string, unknown>): SubscriptionType[] {
-  const tools = capabilities?.tools as { listChanged?: unknown } | undefined;
-  if (!tools) return [];
+  const wanted: SubscriptionType[] = [];
   // `listChanged: false` is a server saying its list is fixed. Believe it.
-  if (tools.listChanged === false) return [];
-  return ["toolsListChanged"];
+  const declares = (key: string): boolean => {
+    const cap = capabilities?.[key] as { listChanged?: unknown } | undefined;
+    return Boolean(cap) && cap!.listChanged !== false;
+  };
+  if (declares("tools")) wanted.push("toolsListChanged");
+  if (declares("prompts")) wanted.push("promptsListChanged");
+  if (declares("resources")) wanted.push("resourcesListChanged");
+  return wanted;
 }
 
 /**
@@ -49,6 +57,22 @@ export function subscriptionsFor(capabilities: Record<string, unknown>): Subscri
  * while the cost of an extra match is one wasted `tools/list`.
  */
 export function isToolsChanged(method: string): boolean {
+  return isListChanged(method, "tool");
+}
+
+/** Does this notification mean "your prompt list is stale" (pure)? */
+export function isPromptsChanged(method: string): boolean {
+  return isListChanged(method, "prompt");
+}
+
+/** Does this notification mean "your resource list is stale" (pure)? */
+export function isResourcesChanged(method: string): boolean {
+  // `resources/updated` is a different thing — one resource's CONTENT changed — and we
+  // hold no per-resource cache to invalidate, so it is deliberately not matched here.
+  return isListChanged(method, "resource");
+}
+
+function isListChanged(method: string, subject: string): boolean {
   const m = method.toLowerCase();
-  return m.includes("tool") && (m.includes("list_changed") || m.includes("listchanged"));
+  return m.includes(subject) && (m.includes("list_changed") || m.includes("listchanged"));
 }

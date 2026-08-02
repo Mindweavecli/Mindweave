@@ -7,25 +7,34 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isToolsChanged, subscriptionsFor, SUBSCRIPTION_TYPES } from "./subscriptions.js";
+import { isPromptsChanged, isResourcesChanged, isToolsChanged, subscriptionsFor, SUBSCRIPTION_TYPES } from "./subscriptions.js";
 
-test("we subscribe to tool changes, and only tool changes", () => {
-  // Prompts and resources land in Phase 6. Subscribing now would mean accepting
-  // notifications with nothing to do about them.
+test("we subscribe to exactly the lists we can act on", () => {
+  // All three are actionable since Phase 6: a tool change rebuilds the catalog and
+  // re-runs the trust check, a prompt change rebuilds the slash commands, a resource
+  // change invalidates a cached listing.
   assert.deepEqual(subscriptionsFor({ tools: {} }), ["toolsListChanged"]);
-  assert.ok(SUBSCRIPTION_TYPES.includes("promptsListChanged"), "the type exists…");
-  assert.ok(!subscriptionsFor({ tools: {}, prompts: {}, resources: {} }).includes("promptsListChanged"), "…but we do not ask for it");
+  assert.deepEqual(subscriptionsFor({ tools: {}, prompts: {}, resources: {} }), [
+    "toolsListChanged",
+    "promptsListChanged",
+    "resourcesListChanged",
+  ]);
+  // Still NOT this one: per-resource content watching, which nothing consumes.
+  assert.ok(SUBSCRIPTION_TYPES.includes("resourceSubscriptions"), "the type exists…");
+  assert.ok(!subscriptionsFor({ tools: {}, resources: {} }).includes("resourceSubscriptions"), "…but we do not ask for it");
 });
 
-test("a server with no tools gets no subscription at all", () => {
+test("a server offering none of it gets no subscription at all", () => {
   // An empty subscription still costs a held-open stream.
   assert.deepEqual(subscriptionsFor({}), []);
-  assert.deepEqual(subscriptionsFor({ resources: {} }), []);
+  assert.deepEqual(subscriptionsFor({ logging: {} }), []);
 });
 
-test("a server saying its list is fixed is believed", () => {
+test("a server saying its list is fixed is believed, per list", () => {
   assert.deepEqual(subscriptionsFor({ tools: { listChanged: false } }), []);
   assert.deepEqual(subscriptionsFor({ tools: { listChanged: true } }), ["toolsListChanged"]);
+  // One fixed list must not silence the others.
+  assert.deepEqual(subscriptionsFor({ tools: { listChanged: false }, prompts: {} }), ["promptsListChanged"]);
 });
 
 test("tool-change notifications are matched across spellings", () => {
@@ -36,4 +45,17 @@ test("tool-change notifications are matched across spellings", () => {
   assert.equal(isToolsChanged("notifications/tools/listChanged"), true);
   assert.equal(isToolsChanged("notifications/resources/list_changed"), false);
   assert.equal(isToolsChanged("notifications/progress"), false);
+});
+
+test("prompt and resource changes are matched, and kept apart from each other", () => {
+  assert.equal(isPromptsChanged("notifications/prompts/list_changed"), true);
+  assert.equal(isPromptsChanged("promptsListChanged"), true);
+  assert.equal(isPromptsChanged("notifications/tools/list_changed"), false);
+
+  assert.equal(isResourcesChanged("notifications/resources/list_changed"), true);
+  assert.equal(isResourcesChanged("resourcesListChanged"), true);
+  assert.equal(isResourcesChanged("notifications/prompts/list_changed"), false);
+  // A single resource's CONTENT changing is a different event, and we hold no
+  // per-resource cache to invalidate — matching it would cause a pointless refetch.
+  assert.equal(isResourcesChanged("notifications/resources/updated"), false);
 });

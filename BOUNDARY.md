@@ -151,12 +151,12 @@ model not to repeat a summary (written for an observed failure, and captured
 transcripts show the model doing it anyway, with the line present), and one telling
 it not to blindly retry (already enforced deterministically by `REPEAT_FAIL_LIMIT`).
 The lesson generalizes: **a sentence the model ignores costs every provider and
-helps none.** When one model misbehaves, prefer a mechanical guard — the harness can
+helps none.** When one model misbehaves, prefer a mechanical guard, because the harness can
 enforce, a sentence can only ask. `promptAssembly.test.ts` now asserts those lines
 stay gone.
 
 **Core must never name a model id.** `/model`'s autocomplete described "DeepSeek V4
-Flash / Pro" long after a second provider had shipped four models — plainly false,
+Flash / Pro" long after a second provider had shipped four models, plainly false,
 and read by the user every session. The `/think` overlay separately fell back to a
 hardcoded `"deepseek-v4-flash"`. Both type-checked, both passed every test, and
 neither could ever throw. Provider identity leaks into the **UI layer** as readily as
@@ -175,7 +175,7 @@ stupid model. It was an obedient one following a stale instruction. Prefer point
 at a tool (`call list_sessions`) over asserting an absence: a dead tool pointer fails
 loudly, a false negative claim never fails at all. Any sentence describing what the
 agent *cannot* do needs a test pinning it, so shipping the capability turns that test
-red — which is exactly how this one was finally caught.
+red, which is exactly how this one was finally caught.
 
 **Hardcoded UI strings are the same bug wearing different clothes.** The banner read
 `v0.0.1` for three releases while `package.json` said otherwise. `/model` described
@@ -185,6 +185,23 @@ standing in for something that has a real source of truth, in a place no asserti
 looks. Read from the source (`package.json`, `allModels()`, `DEFAULT_MODEL_CONFIG`),
 and guard it with a test that compares the two. `version.test.ts` and
 `providerNeutrality.test.ts` are those guards.
+
+**A test fixture can be the one input that does not hit the bug.** The stdio transport
+spawned MCP servers by name, and every test drove it with `process.execPath`, which is
+an absolute path to a real `.exe`. On Windows that is the single shape that works
+without a shell. Every other shape, including `npx`, which is how nearly every MCP
+server in existence is configured, failed with `ENOENT` on the platform this project is
+developed on. Twelve tests passed for a feature that could not start a real server. When
+a test constructs its own input, ask what makes that input convenient, and whether
+convenience is what makes it work.
+
+**A check that runs once guards a moment, not a property.** Tool descriptions were
+fingerprinted when a server connected, which reads like protection against a server
+changing its descriptions. It is not. It is protection against a server that had already
+changed them *before* connecting. A server that connected clean and then announced a new
+tool list had the new descriptions loaded unexamined, which is the precise attack the
+fingerprints exist to catch. When a guard runs at one point in a lifecycle, write down
+which events can move the thing it guards, and check that each one re-enters the guard.
 
 ---
 

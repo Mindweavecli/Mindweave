@@ -28,10 +28,20 @@ import { parseToolList, type McpToolDef } from "./catalog.js";
 import type { McpServerConfig } from "./config.js";
 import { probe, UnsupportedProtocolVersionError, type Negotiated } from "./discover.js";
 import { buildMeta, DEFAULT_CLIENT_CAPABILITIES, cacheDirectiveOf, type CacheDirective } from "./protocol.js";
+import { hasPrompts, parsePromptList, type McpPrompt } from "./prompts.js";
+import {
+  hasResources,
+  parseResourceList,
+  parseResourceRead,
+  parseTemplateList,
+  type McpResource,
+  type McpResourceTemplate,
+} from "./resources.js";
+import type { McpContentBlock } from "./catalog.js";
 import { HttpTransport } from "./transport/http.js";
 import { StdioTransport } from "./transport/stdio.js";
 import { RpcError, type Transport } from "./transport/types.js";
-import { isToolsChanged, subscriptionsFor } from "./subscriptions.js";
+import { isPromptsChanged, isResourcesChanged, isToolsChanged, subscriptionsFor } from "./subscriptions.js";
 
 /** Consecutive failed connect attempts before we stop trying on our own. */
 export const MAX_CONNECT_ATTEMPTS = 3;
@@ -56,6 +66,10 @@ export interface ConnectionStatus {
   name: string;
   state: ConnectionState;
   toolCount: number;
+  /** Prompts this server offers as slash commands (the user's half of MCP). */
+  promptCount: number;
+  /** Whether it exposes readable resources, which have no count until they are listed. */
+  offersResources: boolean;
   /** Why it is failed, when it is. */
   error?: string;
   /** Negotiated protocol revision, once connected. */
@@ -77,8 +91,15 @@ export class McpConnection {
   private transport: Transport | null = null;
   private negotiated: Negotiated | null = null;
   private toolDefs: McpToolDef[] = [];
+  private promptDefs: McpPrompt[] = [];
+  private resourceDefs: McpResource[] = [];
+  private templateDefs: McpResourceTemplate[] = [];
   private cache: CacheDirective = {};
   private toolsFetchedAt = 0;
+  /** When the resource listing was last fetched (0 = never). Resources are loaded lazily,
+   *  so this is the only thing standing between a curious model and a refetch per call. */
+  private resourcesFetchedAt = 0;
+  private resourceCache: CacheDirective = {};
   private state: ConnectionState;
   private lastError = "";
   private attempts = 0;
@@ -105,6 +126,8 @@ export class McpConnection {
       name: this.config.name,
       state: this.state,
       toolCount: this.toolDefs.length,
+      promptCount: this.promptDefs.length,
+      offersResources: this.offersResources(),
       attempts: this.attempts,
       ...(this.lastError ? { error: this.lastError } : {}),
       ...(this.negotiated ? { version: this.negotiated.version, legacy: this.negotiated.legacy } : {}),
@@ -114,6 +137,12 @@ export class McpConnection {
 
   tools(): readonly McpToolDef[] {
     return this.toolDefs;
+  }
+
+  /** This server's prompts, fetched at connect (they have to exist before the command
+   *  list is rendered, and there is no way to discover them lazily from a keystroke). */
+  prompts(): readonly McpPrompt[] {
+    return this.promptDefs;
   }
 
   isConnected(): boolean {
@@ -172,6 +201,12 @@ export class McpConnection {
       );
 
       await this.loadTools();
+      // Prompts are eager, resources are not, and the difference is deliberate. A prompt
+      // has to exist before the user presses `/`, so there is no lazy moment to fetch it
+      // in. A resource listing is only ever wanted when the model goes looking, and
+      // fetching every server's on connect would slow every session down for a feature
+      // most projects never touch.
+      await this.loadPrompts();
       transport.onNotification((note) => this.onNotify(note));
       await this.subscribe(transport);
       this.state = "connected";
@@ -192,9 +227,18 @@ export class McpConnection {
    * Opt into the change notifications we can actually act on.
    *
    * Best-effort by design: a server that does not support `subscriptions/listen` (every
-   * pre-2026 one) or refuses the request is still perfectly usable, just with a catalog
-   * that only refreshes when its TTL expires. Letting a failed subscription fail the
-   * whole connection would drop most servers in existence for the sake of an optimization.
+   * pre-2026 one) or refuses the request is still perfectly usable. Letting a failed
+   * subscription fail the whole connection would drop most servers in existence for the
+   * sake of an optimization.
+   *
+   * Be precise about what is lost, because an earlier version of this comment was not:
+   * there is NO periodic refresh. `ttlMs` is only ever read as permission to SKIP a
+   * refetch, never as a timer, so nothing polls. Without a subscription the catalog moves
+   * only when the server pushes `notifications/tools/list_changed` on its own (which
+   * stdio servers do regardless of dialect, and many pre-2026 ones send) or when the user
+   * reconnects it from `/mcp`. A poller is deliberately not built: it would re-fetch every
+   * server on a timer to catch a case the push path already covers, and each refresh that
+   * did find a change would cost a prompt-cache prefix.
    */
   private async subscribe(transport: Transport): Promise<void> {
     if (!this.negotiated || this.negotiated.dialect !== "stateless") return;
@@ -204,19 +248,27 @@ export class McpConnection {
       if (transport.openStream) await transport.openStream("subscriptions/listen", { types });
       else await this.call("subscriptions/listen", { types });
     } catch {
-      // No subscription; the TTL path still keeps the catalog roughly current.
+      // No subscription. The catalog is then whatever the server pushes unprompted, or
+      // what a `/mcp` reconnect fetches — see above.
     }
   }
 
-  /** A server telling us something changed. Today only the tool list is actionable. */
+  /** A server telling us one of its lists moved. */
   private onNotify(note: { method: string }): void {
-    if (!isToolsChanged(note.method)) return;
-    // Force past the TTL: the server just told us the cached answer is wrong.
-    void this.loadTools(true)
+    // Force past the TTL in every case: the server just told us the cached answer is wrong.
+    const refresh = isToolsChanged(note.method)
+      ? this.loadTools(true)
+      : isPromptsChanged(note.method)
+        ? this.loadPrompts()
+        : isResourcesChanged(note.method)
+          ? this.loadResources(true)
+          : null;
+    if (!refresh) return;
+    void refresh
       .then(() => this.changed())
       .catch(() => {
-        // A refresh that fails leaves the previous catalog in place, which is strictly
-        // better than dropping the tools because one notification could not be served.
+        // A refresh that fails leaves the previous list in place, which is strictly
+        // better than dropping it because one notification could not be served.
       });
   }
 
@@ -258,6 +310,75 @@ export class McpConnection {
     this.toolsFetchedAt = Date.now();
   }
 
+  /**
+   * Fetch this server's prompts, if it has any.
+   *
+   * Best-effort in both directions: a server that does not advertise prompts is not
+   * asked, and one that advertises them but fails the call simply has none. A broken
+   * `prompts/list` must not cost the user the server's tools, which are the main event.
+   */
+  async loadPrompts(): Promise<void> {
+    if (!this.negotiated || !hasPrompts(this.negotiated.capabilities)) return;
+    try {
+      this.promptDefs = parsePromptList(this.config.name, await this.call("prompts/list"));
+    } catch {
+      this.promptDefs = [];
+    }
+  }
+
+  /** Render one of this server's prompts. Rejects, because the caller is a command the
+   *  user just typed and silence would be worse than an error. */
+  async getPrompt(name: string, args: Record<string, string>): Promise<unknown> {
+    return this.call("prompts/get", { name, ...(Object.keys(args).length > 0 ? { arguments: args } : {}) });
+  }
+
+  /**
+   * Fetch (or refresh) this server's resources and templates.
+   *
+   * Honours the server's own `ttlMs` the same way the tool catalog does, which matters
+   * more here: the model can call the listing tool repeatedly within one turn, and
+   * without the cache each call would be two round trips to every server.
+   */
+  async loadResources(force = false): Promise<void> {
+    if (!this.negotiated || !hasResources(this.negotiated.capabilities)) return;
+    if (!force && this.resourcesFetchedAt && this.resourceCache.ttlMs !== undefined) {
+      if (Date.now() - this.resourcesFetchedAt < this.resourceCache.ttlMs) return;
+    }
+    try {
+      const listed = await this.call("resources/list");
+      this.resourceDefs = parseResourceList(this.config.name, listed);
+      this.resourceCache = cacheDirectiveOf(listed);
+      this.resourcesFetchedAt = Date.now();
+    } catch {
+      this.resourceDefs = [];
+    }
+    try {
+      // Separate try: templates are optional even for a server that has resources, and a
+      // server that has never heard of `resources/templates/list` must not lose its list.
+      this.templateDefs = parseTemplateList(this.config.name, await this.call("resources/templates/list"));
+    } catch {
+      this.templateDefs = [];
+    }
+  }
+
+  resources(): readonly McpResource[] {
+    return this.resourceDefs;
+  }
+
+  resourceTemplates(): readonly McpResourceTemplate[] {
+    return this.templateDefs;
+  }
+
+  /** True when this server declared a resources capability at all. */
+  offersResources(): boolean {
+    return Boolean(this.negotiated && hasResources(this.negotiated.capabilities));
+  }
+
+  /** Read one resource by URI. */
+  async readResource(uri: string): Promise<McpContentBlock[]> {
+    return parseResourceRead(await this.call("resources/read", { uri }));
+  }
+
   /** Invoke a tool on this server. */
   async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
     return this.call("tools/call", { name, arguments: args });
@@ -274,7 +395,11 @@ export class McpConnection {
     this.transport = null;
     this.negotiated = null;
     this.toolDefs = [];
+    this.promptDefs = [];
+    this.resourceDefs = [];
+    this.templateDefs = [];
     this.toolsFetchedAt = 0;
+    this.resourcesFetchedAt = 0;
     if (this.state === "connected") {
       this.state = "pending";
       this.lastError = "server exited";
@@ -317,7 +442,11 @@ export class McpConnection {
     this.transport = null;
     this.negotiated = null;
     this.toolDefs = [];
+    this.promptDefs = [];
+    this.resourceDefs = [];
+    this.templateDefs = [];
     this.toolsFetchedAt = 0;
+    this.resourcesFetchedAt = 0;
     if (transport) await transport.close().catch(() => {});
   }
 

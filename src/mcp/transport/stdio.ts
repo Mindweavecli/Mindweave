@@ -16,10 +16,54 @@
  *     reason is almost always on stderr and is otherwise lost.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { killTree } from "../../tools/killTree.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS, RpcError, type Notification, type Transport } from "./types.js";
 
 /** How much of the child's stderr to keep for diagnostics. */
 const STDERR_TAIL_CHARS = 4_000;
+
+/**
+ * Does this command need a shell on Windows (pure)?
+ *
+ * `spawn` on Windows executes a binary directly and does NOT apply PATHEXT, so it can
+ * only find something that is already a real executable. Every npm-installed launcher —
+ * `npx`, `pnpm`, `uvx`, `yarn` — is a `.cmd` shim on PATH, so `spawn("npx", …)` fails
+ * with ENOENT. That matters more than it sounds: `{"command": "npx", "args": ["-y",
+ * "@scope/server"]}` is how essentially every MCP server in the ecosystem is configured,
+ * including in this codebase's own config docstring. Checking for a literal `.cmd`/`.bat`
+ * suffix (what we did before) only helps the rare user who spelled the extension out.
+ *
+ * So: anything that is not already a directly-executable image goes through the shell,
+ * which is what performs PATHEXT lookup. `.exe`/`.com` and absolute paths to them are
+ * spawned directly, because a shell there buys nothing and adds a quoting problem.
+ */
+export function windowsNeedsShell(command: string): boolean {
+  return !/\.(exe|com)$/i.test(command.trim());
+}
+
+/**
+ * Quote one token for `cmd.exe` (pure).
+ *
+ * Only when it needs it: an untouched token is easier to read in an error message, and
+ * the overwhelming majority (`-y`, `@scope/pkg`) contain nothing special. Internal
+ * quotes are doubled, which is the form `cmd` itself understands.
+ */
+export function quoteForCmd(token: string): string {
+  if (token === "") return '""';
+  if (!/[\s"^&|<>()%!]/.test(token)) return token;
+  return `"${token.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Build the single command line a shell spawn takes (pure).
+ *
+ * The previous code interpolated `"${command}" ${args.join(" ")}`, which breaks the
+ * moment any argument holds a space — a Windows path with `Program Files` in it, say —
+ * because the argument silently splits in two.
+ */
+export function windowsCommandLine(command: string, args: readonly string[]): string {
+  return [command, ...args].map(quoteForCmd).join(" ");
+}
 
 export interface StdioOptions {
   command: string;
@@ -55,6 +99,8 @@ export function drainLines(buffer: string): { lines: string[]; rest: string } {
 
 export class StdioTransport implements Transport {
   private readonly proc: ChildProcess;
+  /** True when the child is a shell wrapping the real server (Windows). */
+  private readonly shelled: boolean;
   private nextId = 1;
   private buffer = "";
   private stderrTail = "";
@@ -76,12 +122,12 @@ export class StdioTransport implements Transport {
 
     const args = [...(options.args ?? [])];
     const env = { ...process.env, ...(options.env ?? {}) };
-    // Windows npm shims (.cmd/.bat) are batch files, not executables, so spawn cannot
-    // run them directly — they need a shell. Carried over from the previous
-    // implementation because it is correct and non-obvious.
-    const winShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(options.command);
-    this.proc = winShim
-      ? spawn(`"${options.command}" ${args.join(" ")}`, {
+    // On Windows almost everything has to go through a shell to be found at all; see
+    // `windowsNeedsShell`. POSIX spawns directly, where PATH lookup already works and a
+    // shell would only add a quoting surface.
+    this.shelled = process.platform === "win32" && windowsNeedsShell(options.command);
+    this.proc = this.shelled
+      ? spawn(windowsCommandLine(options.command, args), {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
           shell: true,
@@ -201,6 +247,11 @@ export class StdioTransport implements Transport {
   async close(): Promise<void> {
     if (!this.disposed) this.die(new Error("mcp transport closed"));
     try {
+      // A shelled child is `cmd.exe`, not the server. Killing it leaves the real server
+      // — a node or python process holding a port, a lock, or an API session — running
+      // after Mindweave exits, which is exactly the orphan the shell tools already use
+      // `killTree` to avoid. POSIX spawns directly, so there is nothing in between.
+      if (this.shelled) killTree(this.proc.pid);
       this.proc.kill();
     } catch {
       // Already gone.
