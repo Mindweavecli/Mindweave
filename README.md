@@ -196,12 +196,6 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 
 ## Roadmap
 
-- [x] Terminal agent loop + streaming UI
-- [x] File / shell / search tools, sub-agents, background jobs
-- [x] Session memory + compaction
-- [x] Deterministic code intelligence (tree-sitter + language servers)
-- [x] Per-project governor (rules / skills / forbidden)
-- [x] DeepSeek driver
 - [x] **v1.0: first public release**
 - [x] **v1.1: Anthropic (Claude) driver, providers loaded on demand, provider-aware setup, cut off replies caught**
 - [x] **v1.1.2: shared core made provider-neutral, with tests guarding it**
