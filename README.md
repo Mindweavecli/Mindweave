@@ -46,7 +46,7 @@ If it does not clearly do at least one of those, with the others not made worse,
 
 So the preferred shape of a good contribution is: this replaces that, and here is why the result is smaller, faster, or more correct. A proposal that adds a capability and removes nothing has to justify its permanent cost to everyone, not just its benefit to the person proposing it.
 
-### How to change our mind
+### Got some core idea?
 
 Bring evidence, not preference. A better architecture is genuinely welcome and will be taken seriously, on these terms:
 
