@@ -71,6 +71,8 @@ Before opening an issue, check the existing issues to avoid duplicates. When fil
 
 A word on scope, so nobody wastes an afternoon: **the core is deliberately close to finished.** The default answer to "should this be added" is no. What gets merged readily is a new driver, a reproduced bug with a failing test, or a demonstrated correctness gap. What does not is a feature nobody hit a wall without. A smaller core that does its job well beats a larger one that does more, and every line in the shared engine is paid for by every provider forever.
 
+That is the short version. The full statement of how this project is run, why the core bar is high while the driver bar is low, and exactly what evidence will change our mind about the architecture, is in the [philosophy section of the README](README.md#the-philosophy-a-core-that-stays-still). Read it before proposing anything core-shaped. It is worth knowing up front that we are looking to **replace rather than accumulate**: a proposal that adds a tool and removes nothing has to justify a permanent cost paid by every user on every turn.
+
 ### What we are working on next
 
 MCP shipped in v1.3, and v1.4 added resources, server prompts and result spilling. What remains, and what v1.5 is about:
