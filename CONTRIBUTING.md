@@ -73,7 +73,7 @@ A word on scope, so nobody wastes an afternoon: **the core is deliberately close
 
 ### What we are working on next
 
-MCP shipped in v1.3, and v1.3.1 added resources, server prompts and result spilling. What remains, and what v1.4 is about:
+MCP shipped in v1.3, and v1.4 added resources, server prompts and result spilling. What remains, and what v1.5 is about:
 
 * **OAuth for remote servers.** Servers needing authorization currently report `needs-auth` and stop there. This is the largest remaining piece and the hardest to verify, since it needs a real identity provider to test against. If you run one, that help is worth more than the code.
 * **Multi-round tool requests and elicitation.** A server that needs extra input mid-call cannot ask for it yet.
@@ -83,7 +83,7 @@ If that is where you want to help, say so in Discussions before writing code so 
 
 ### Especially useful right now
 
-**MCP is new and has only been tested against servers we wrote ourselves.** Real-world servers will find edges we did not: unusual protocol revisions, odd schemas, servers that behave badly on shutdown. A bug report from a real server is more valuable than a feature right now.
+**MCP has been tested against one real published server and a set of fixtures we wrote.** Tools have been exercised against a real `npx`-launched server end to end; resources and prompts have not, because nothing we could reach exposes them. Real-world servers will find edges we did not: unusual protocol revisions, odd schemas, servers that behave badly on shutdown. A bug report from a real server is more valuable than a feature right now, and one from a server that actually serves resources or prompts is worth more still.
 
 The same goes for **macOS and Linux**. Development happens on Windows. Both are believed to work and neither is verified.
 

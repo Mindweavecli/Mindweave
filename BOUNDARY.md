@@ -203,6 +203,26 @@ tool list had the new descriptions loaded unexamined, which is the precise attac
 fingerprints exist to catch. When a guard runs at one point in a lifecycle, write down
 which events can move the thing it guards, and check that each one re-enters the guard.
 
+**A tool description biases a choice. It cannot make one hold.** Two tools existed for
+editing, one for a single change and one for several in the same file, and each named the
+other so the model could route between them. Measured against a real model, the identical
+task with identical descriptions produced three different shapes across four runs: one
+batched call, one batched plus one single, and five separate single edits. Not a wrong
+description, and not a model that needs a better one. Sampling variance. The tempting
+next move is to fix it in that provider's driver, and it is not available: a driver owns
+format, never behaviour, and the system prompt is byte-identical across providers by
+design. So a property that must hold on every model has nowhere to live except the
+harness. If you catch yourself writing a sentence to make the model do something
+reliably, you are writing a preference, not a guarantee, and the thing you actually
+wanted belongs next to the verify gate and the repeat-failure breaker.
+
+**Measure the cost before building the fix.** The same routing variance looked expensive
+until it was counted: five separate edit calls still cost two model round trips, because
+they arrive batched in one message. What it actually cost was five UI rows and five undo
+points instead of one, which is a reviewability problem, not a token problem. The fix was
+worth building for that reason and not the one originally assumed, and the difference
+would have been invisible without instrumenting the event stream.
+
 ---
 
 ## Where things live

@@ -32,7 +32,8 @@ export const replaceSymbolBody: Tool = {
     "Give the symbol `name` and the complete `new_definition` (its signature AND body). The tool " +
     "locates the symbol via the code map and swaps its lines — no exact old_string needed. Read the " +
     "symbol first (read_symbol). Pass `path` when the name is defined in more than one file; if the " +
-    "target is ambiguous the tool changes nothing and asks you to narrow it.",
+    "target is ambiguous the tool changes nothing and asks you to narrow it. Prefer this when you are " +
+    "rewriting a whole function or class; use edit_file or multi_edit for changes WITHIN one.",
   parameters: {
     type: "object",
     additionalProperties: false,

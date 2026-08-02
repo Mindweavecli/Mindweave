@@ -27,9 +27,11 @@ export const writeFile: Tool = {
   name: "write_file",
   readOnly: false,
   description:
-    "Write a file to disk, creating it (and any missing parent folders) or " +
-    "overwriting it. To overwrite an existing file you must read_file it first. " +
-    "Use edit_file instead when changing part of a file.",
+    "Create a new file, or replace an existing one wholesale. To overwrite an existing file " +
+    "you must read_file it first. Prefer a targeted change to rewriting: use edit_file to " +
+    "change one place in a file, multi_edit for several places in the same file, and this " +
+    "only when the file is new or genuinely being replaced end to end. Rewriting a file to " +
+    "change part of it risks dropping code you didn't mean to touch.",
   parameters: {
     type: "object",
     additionalProperties: false,

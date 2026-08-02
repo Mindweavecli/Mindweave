@@ -11,12 +11,14 @@
  *    `old_string` is copied from real content, not imagined.
  *  - must-exist: zero matches errors instead of silently doing nothing, so the
  *    model learns its match was wrong.
- *  - unique-match: more than one match (without replace_all) errors and asks for
- *    more surrounding context, so an edit never lands in the wrong place.
+ *  - unique-match: more than one match (without replace_all) errors and hands back
+ *    WHERE the candidates are, so an edit never lands in the wrong place and the
+ *    retry is informed rather than another guess.
  *
- * Matching is EXACT — no fuzzy/whitespace-normalizing fallbacks. A capable model
- * can reproduce the bytes it just read, and exact matching is predictable; fuzzy
- * matching is a crutch for weaker models that trades surprises for convenience.
+ * Matching is exact first, then line-trimmed — and stops there. It is deliberately not
+ * a stack of ever-looser matchers: past a point, "looser" only means "more ways to edit
+ * the wrong block", which is a corruption bug rather than a convenience. The reasoning,
+ * and what is deliberately NOT implemented, lives in editCore.ts.
  * (Deciding *what* to change is the model's job; this tool only applies it.)
  */
 import { promises as fs } from "node:fs";
@@ -25,15 +27,18 @@ import { recordWrite, relativize } from "./paths.js";
 import { editDetail, lineCount, magnitude, rangeLabel, withScope } from "./detail.js";
 import { applyEol } from "./eol.js";
 import { applyOneEdit } from "./editCore.js";
-import { prepareEditTarget, fail, errText } from "./editTarget.js";
+import { prepareEditTarget, fail, failQuietly, errText } from "./editTarget.js";
 
 export const editFile: Tool = {
   name: "edit_file",
   readOnly: false,
   description:
-    "Replace an exact string in a file with another. `old_string` must match the " +
-    "file's text verbatim (including whitespace) and be unique unless `replace_all` " +
-    "is set. Read the file first. Use write_file to create a new file.",
+    "Replace a string in a file with another. This is the DEFAULT editing tool: reach for " +
+    "it whenever you are changing one place in a file. `old_string` must match the file's " +
+    "text and be unique unless `replace_all` is set — include surrounding lines if it isn't. " +
+    "Read the file first. If the SAME file needs changing in several separate places, use " +
+    "multi_edit instead of calling this repeatedly. Use write_file only to create a new file " +
+    "or replace one wholesale.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -88,7 +93,9 @@ export const editFile: Tool = {
     // match whitespace and indentation exactly (handled in editCore). The file's
     // own line endings are preserved on write.
     const applied = applyOneEdit(content, { oldString, newString, replaceAll });
-    if (!applied.ok) return fail(`${applied.reason} (in ${rawPath}).`);
+    // A match that didn't land is the model's to correct — it gets the reason and the
+    // candidate locations, and retries. Not the user's business, so it stays off screen.
+    if (!applied.ok) return failQuietly(`${applied.reason} (in ${rawPath}).`);
     const { updated: updatedNorm, count, changeStart, changeEnd } = applied;
     const updated = applyEol(updatedNorm, eol);
 

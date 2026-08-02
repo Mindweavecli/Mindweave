@@ -102,7 +102,7 @@ export type Action =
   | { type: "user"; text: string }
   | { type: "token"; delta: string }
   | { type: "toolStart"; toolId: string; name: string; arg?: string; action?: ToolKind; group?: boolean }
-  | { type: "toolEnd"; toolId: string; ok: boolean; summary?: string; detail?: string }
+  | { type: "toolEnd"; toolId: string; ok: boolean; summary?: string; detail?: string; quiet?: boolean }
   // A sub-agent's nested lifecycle: a start opens its rail block, its tool calls fold
   // in as rail items (subTool*), and end collapses it to a summary. Keyed by agentId.
   | { type: "subagentStart"; agentId: string; task: string; readOnly: boolean }
@@ -131,6 +131,28 @@ function drain(s: TranscriptState): TranscriptState {
 
 function patchTail(s: TranscriptState, id: number, fields: Partial<Block>): TranscriptState {
   return { ...s, tail: s.tail.map((b) => (b.id === id ? ({ ...b, ...fields } as Block) : b)) };
+}
+
+/**
+ * Remove a tool's row entirely — used for a quiet failure, which the user never sees.
+ *
+ * Two shapes to unwind. A GROUPED call is one item inside a discovery group, so only
+ * that item is dropped; if it was the group's last item the empty group goes too, since
+ * an "Exploring… (0)" header would be the very noise this is removing. A STANDALONE call
+ * owns its whole block, which is dropped outright.
+ *
+ * The toolMap entry goes as well, so a late or duplicate event for the same id cannot
+ * resurrect a row that was deliberately hidden.
+ */
+function dropTool(s: TranscriptState, toolId: string, blockId: number): TranscriptState {
+  const { [toolId]: _gone, ...toolMap } = s.toolMap;
+  const block = s.tail.find((b) => b.id === blockId);
+  if (block && block.kind === "tools") {
+    const items = block.items.filter((it) => it.toolId !== toolId);
+    const tail = items.length > 0 ? s.tail.map((b) => (b.id === blockId ? ({ ...b, items } as Block) : b)) : s.tail.filter((b) => b.id !== blockId);
+    return drain({ ...s, tail, toolMap });
+  }
+  return drain({ ...s, tail: s.tail.filter((b) => b.id !== blockId), toolMap });
 }
 
 /** Close an open discovery group so it can commit, before any non-grouped event. */
@@ -236,6 +258,12 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
       const blockId = s.toolMap[a.toolId];
       if (blockId == null) return s;
       const block = s.tail.find((b) => b.id === blockId);
+      // A quiet failure never becomes a visible row: the model asked for something it
+      // could not have, was told why, and will ask again. Showing "could not edit
+      // because…" for a step the agent resolves by itself teaches the user to ignore
+      // error rows, which is worse than showing nothing. The model still gets the full
+      // reason, and the transcript still records it — this is a display decision only.
+      if (a.quiet) return dropTool(s, a.toolId, blockId);
       if (block && block.kind === "tools") {
         // Resolve this item's status in place AND capture its one-line result, so the
         // group list shows what each call found (195 lines / 12 files), not just a name.

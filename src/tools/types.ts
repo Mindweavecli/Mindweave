@@ -36,6 +36,26 @@ export interface ToolResult {
    * added/removed; bare lines render plain. See detail.ts.
    */
   detail?: string;
+
+  /**
+   * Display-only: this failure is the agent's own business, not news for the user.
+   *
+   * Some failures are ROUTINE INTERNAL STEPS. An `old_string` that matched two places
+   * is not a fault in the project, an outage, or anything the user can act on — it is
+   * the model being told to aim more precisely, which it then does. Painting it as a
+   * red error row makes ordinary self-correction look like something went wrong, and a
+   * screen full of "could not edit because…" is noise the user has to learn to ignore.
+   *
+   * So a quiet result still reaches the MODEL in full (it needs the reason to fix its
+   * aim) and is still recorded in the transcript, but the UI drops the row. This is the
+   * same call already made for background machinery like compaction and verification,
+   * which run silently rather than narrating themselves.
+   *
+   * Only for failures the model can resolve on its own, in the same turn, with no user
+   * involvement. A refused permission, a missing file, a failed write, a command that
+   * exited non-zero — those are real news and stay visible.
+   */
+  quiet?: boolean;
 }
 
 /**

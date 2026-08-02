@@ -68,7 +68,8 @@ export async function prepareEditTarget(
   if (stat.isDirectory()) return { ok: false, error: fail(`${rawPath} is a directory, not a file.`) };
 
   // Read-before-edit: the anti-confabulation gate.
-  if (!ctx.reads.has(filePath)) {
+  const seen = ctx.reads.get(filePath);
+  if (!seen) {
     return {
       ok: false,
       error: fail(
@@ -84,11 +85,66 @@ export async function prepareEditTarget(
     return { ok: false, error: fail(`could not read ${rawPath}: ${errText(error)}`) };
   }
 
+  // Freshness: has the file moved since it was read?
+  //
+  // Without this the situation is still SAFE — the edit is matched against the file's
+  // current bytes, so a stale `old_string` simply fails to match — but it is diagnosed
+  // WRONGLY. The model is told "old_string not found, re-read and copy the target text
+  // precisely", which reads as "you mistyped", so it retries the same doomed string
+  // instead of re-reading. The cause has to be named for the recovery to be the right one.
+  //
+  // And the quieter case is worse: if the change landed somewhere the model is not
+  // editing, its edit applies cleanly against content nobody has looked at. That is the
+  // only path here where a confident edit is made on stale understanding, so it is worth
+  // one comparison of two numbers we already hold.
+  if (changedSinceRead(seen, stat)) {
+    return {
+      ok: false,
+      error: failQuietly(
+        `${rawPath} changed on disk since you read it (a command, a formatter, or the user). ` +
+          `Your view of this file is out of date, so an edit based on it could be wrong even where it matches. ` +
+          `Read it again, then redo the edit against what it says now.`,
+      ),
+    };
+  }
+
   return { ok: true, filePath, content, eol: detectEol(content) };
+}
+
+/**
+ * Did the file change between the read that put it in the ledger and now (pure)?
+ *
+ * Both signals are checked because either alone misses real cases: mtime resolution is
+ * coarse enough on some filesystems that a fast rewrite keeps the same stamp, and a size
+ * comparison alone misses any edit that happens to preserve length — a renamed symbol, a
+ * flipped boolean, a changed constant. Neither is exotic in a codebase.
+ *
+ * A file the ledger has no size for (an older record, or one seeded rather than read) is
+ * treated as unchanged: refusing on missing bookkeeping would block edits over our own
+ * gap rather than over anything the user did.
+ */
+export function changedSinceRead(
+  seen: { mtimeMs?: number; size?: number },
+  now: { mtimeMs: number; size: number },
+): boolean {
+  if (typeof seen.size === "number" && seen.size !== now.size) return true;
+  if (typeof seen.mtimeMs === "number" && seen.mtimeMs > 0 && Math.abs(seen.mtimeMs - now.mtimeMs) > 1) return true;
+  return false;
 }
 
 export function fail(message: string): ToolResult {
   return { output: `Error: ${message}`, isError: true, summary: message };
+}
+
+/**
+ * A failure the model is expected to fix by itself, this turn.
+ *
+ * Identical to `fail` for the model — same error text, same `isError`, so nothing about
+ * its recovery changes — but marked `quiet` so the UI does not paint a red row for what
+ * is really a mid-thought correction. See `ToolResult.quiet` for where the line sits.
+ */
+export function failQuietly(message: string): ToolResult {
+  return { output: `Error: ${message}`, isError: true, summary: message, quiet: true };
 }
 
 export function errText(error: unknown): string {

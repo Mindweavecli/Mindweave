@@ -283,6 +283,61 @@ export function repeatFailureNudge(opts: {
   );
 }
 
+/**
+ * How many single edits to the SAME file a turn may make before it is told to batch.
+ *
+ * Two is the allowance because two is defensible: the second edit is often something the
+ * first one revealed. A third means the model is working through a list it already had,
+ * one call at a time.
+ */
+export const SAME_FILE_EDIT_LIMIT = 2;
+
+/**
+ * Count `edit_file` calls per file in a step (pure).
+ *
+ * Only `edit_file` counts. A `multi_edit` is the batched form already, and `write_file`
+ * is a different decision entirely.
+ */
+export function sameFileEditCounts(results: readonly { name: string; args?: Record<string, unknown> }[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const r of results) {
+    if (r.name !== "edit_file") continue;
+    const path = typeof r.args?.path === "string" ? r.args.path.trim() : "";
+    if (!path) continue;
+    counts.set(path, (counts.get(path) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * The file a turn has now edited one-at-a-time too often, or null (pure).
+ *
+ * Why this is mechanical rather than a line in a tool description: measured against a
+ * real model, the same task with the same descriptions routed correctly on one run and
+ * made three separate `edit_file` calls to one file on another. Prose can bias a choice;
+ * it cannot make it hold. Anything that must be true for EVERY provider has to be
+ * enforced by the harness, which is the same reasoning behind the verify gate and the
+ * repeat-failure breaker.
+ */
+export function overusedSingleEdits(
+  running: ReadonlyMap<string, number>,
+  limit = SAME_FILE_EDIT_LIMIT,
+): string | null {
+  for (const [path, n] of running) if (n > limit) return path;
+  return null;
+}
+
+/** The one-shot nudge injected when a turn keeps editing one file a change at a time. */
+export function batchEditNudge(path: string, count: number): string {
+  return (
+    `You've made ${count} separate edit_file calls to ${path} in this turn. When one file needs several ` +
+    `changes, put them in a single multi_edit call for that file instead: they apply in order, each sees the ` +
+    `result of the last, and if any fails to match the file is left untouched rather than half-edited. ` +
+    `Keep it to one call per file — don't try to cover several files in one call. ` +
+    `(This reminder fires once per turn.)`
+  );
+}
+
 /** The one-shot nudge injected when files changed but nothing was checked. */
 export const VERIFY_NUDGE =
   "You edited files this turn but never ran a check. Before finishing, verify what you changed actually " +

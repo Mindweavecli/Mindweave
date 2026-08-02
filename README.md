@@ -18,9 +18,23 @@ MindWeave is a coding agent that lives in your terminal and works directly insid
 
 It's built lean on purpose. Instead of burning your context budget on heavy scaffolding, MindWeave keeps prompts thin and leaves the model room to actually reason about your code.
 
-## v1.3.1: MCP, sharpened
+## v1.4: sharper MCP, and editing that holds up
 
-v1.3 shipped MCP. v1.3.1 is what running it turned up, plus the two pieces of the protocol it didn't cover yet.
+Two halves. MCP got everything running it for real turned up, plus the parts of the protocol v1.3 didn't cover. And the editing tools, the ones every task leans on, were rebuilt around what actually goes wrong.
+
+### Editing
+
+**Your indentation no longer has to be perfect.** An edit used to need a byte-exact match, so if the model retyped a block with the wrong leading whitespace, something it cannot see, the edit was refused and a turn went to waste. Matching is now exact first, then line-by-line ignoring each line's surrounding whitespace. It stops there on purpose: looser matching does not remove failures, it converts visible refusals into silent edits landing in the wrong place, which is a class of bug other tools are still carrying.
+
+**When a change could go in two places, you get told where.** Before, an ambiguous edit produced "matches 2 places" and nothing else, so the retry was another guess. Now it comes back with each candidate, its line number, and enough surrounding code to tell them apart, widening the window until they actually read differently. Both ways out are always named: extend the match, or change all of them.
+
+**Several changes to one file go in one call.** `multi_edit` applies them in order, each seeing the last one's result, and if any fails to match the file is left completely untouched rather than half-edited. One call per file, by design: a change you can review beats one you have to trust.
+
+**Editing a file that moved under you is caught.** If a command, a formatter, or you changed a file after the agent read it, the edit is refused and says so. It used to report this as a typo, sending the model to retype a string that could never match. Worse, if the change was somewhere it wasn't editing, the edit went through against content nobody had looked at.
+
+**Internal retries stay off your screen.** An agent adjusting its own aim is not an error you can act on, and a screen full of "could not edit because…" trains you to ignore the rows that matter. Real failures, permissions, missing files, failed writes, are as visible as ever.
+
+### MCP
 
 **Windows could not start most MCP servers.** `spawn` on Windows doesn't resolve a bare command name through PATHEXT, and the transport only used a shell when the command literally ended in `.cmd`. So `{"command": "npx", ...}`, which is how almost every MCP server on earth is configured, failed with `spawn npx ENOENT`. It now resolves properly, and a server that gets shut down has its whole process tree killed instead of just the shell wrapping it, so nothing is left running after you quit.
 
@@ -153,8 +167,8 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 - [x] **v1.1.2: shared core made provider-neutral, with tests guarding it**
 - [x] **v1.2: reads its own past sessions, failure loops interrupt instead of stopping dead, every early stop explains itself**
 - [x] **v1.3: MCP / external tool servers, with rug-pull protection and a deferred tool pool**
-- [x] **v1.3.1: MCP hardening, plus resources and server prompts**
-- [ ] **v1.4: OAuth for remote servers**, the next release
+- [x] **v1.4: MCP hardening with resources and server prompts, and rebuilt editing tools**
+- [ ] **v1.5: OAuth for remote servers**, the next release
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …), community-built
 - [ ] Verified macOS / Linux support
 

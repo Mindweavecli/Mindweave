@@ -16,7 +16,7 @@
 import { activeDriver, ensureDriver } from "../drivers/registry.js";
 import type { ChatMessage, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
-import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, VERIFY_NUDGE } from "./verify.js";
+import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, VERIFY_NUDGE } from "./verify.js";
 import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, interpretGuardChoice } from "./guard.js";
 import { findTool, toolSchemas } from "../tools/registry.js";
 import { commandShellLabel } from "../tools/runCommand.js";
@@ -317,7 +317,19 @@ export type EngineEvent =
   // UI can nest it under that worker's row instead of the main stream. Absent on the
   // lead agent's own calls.
   | { type: "tool"; phase: "start"; id: string; name: string; args: Record<string, unknown>; agent?: string }
-  | { type: "tool"; phase: "end"; id: string; name: string; summary: string; error: boolean; detail?: string; agent?: string }
+  | {
+      type: "tool";
+      phase: "end";
+      id: string;
+      name: string;
+      summary: string;
+      error: boolean;
+      detail?: string;
+      agent?: string;
+      /** Display-only: a failure the model resolves itself, so the UI drops the row
+       *  rather than painting an error the user can do nothing about. See ToolResult.quiet. */
+      quiet?: boolean;
+    }
   // A spawned sub-agent's lifecycle: `start` when it's dispatched (with its task +
   // read-only flag), `end` when it reports back. Between them, its own tool events
   // arrive tagged with this `id`, so the UI can render a live nested rail per worker.
@@ -577,6 +589,10 @@ export async function respond(session: Session, options: RespondOptions = {}): P
   // resets whenever the failure changes, so each distinct loop gets one interrupt.
   let repeatFailStreak = 0;
   let repeatFailNudged = false;
+  // Single edits per file across the whole turn, and whether the batching reminder has
+  // already fired. One reminder per turn: it is a nudge, not a rule to enforce twice.
+  const singleEditsByFile = new Map<string, number>();
+  let batchEditNudged = false;
   let lastFailSig: string | null = null;
   let lastFailOutput = "";
 
@@ -729,7 +745,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
         if (decision === "allow-all") ctx.guardAllowAll = true;
       }
       const result = await tool.execute(parseArgs(call.arguments), session.toolContext);
-      return { call, output: result.output, summary: result.summary, isError: result.isError, detail: result.detail };
+      return { call, output: result.output, summary: result.summary, isError: result.isError, detail: result.detail, quiet: result.quiet };
     };
 
     // Emit each tool's END the instant IT finishes — not batched after the whole
@@ -746,6 +762,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
         summary: r.summary ?? r.call.name,
         error: r.isError ?? false,
         detail: r.detail,
+        ...(r.quiet ? { quiet: true } : {}),
       });
       return r;
     };
@@ -858,6 +875,29 @@ export async function respond(session: Session, options: RespondOptions = {}): P
       repeatFailStreak = 0;
       lastFailSig = null;
       repeatFailNudged = false;
+    }
+
+    // Batching gate: it keeps editing ONE file a single change at a time, where one
+    // multi_edit call belonged. Mechanical rather than a line in the tool description,
+    // because the same task with the same descriptions routes correctly on one run and
+    // not the next — prose biases a choice, it cannot make it hold, and this has to hold
+    // on every provider. Nudge once and let the turn continue; nothing is blocked, since
+    // the edits themselves are perfectly valid.
+    if (!batchEditNudged) {
+      for (const [path, n] of sameFileEditCounts(
+        results.map((r) => ({ name: r.call.name, args: parseArgs(r.call.arguments) })),
+      )) {
+        singleEditsByFile.set(path, (singleEditsByFile.get(path) ?? 0) + n);
+      }
+      const overused = overusedSingleEdits(singleEditsByFile);
+      if (overused) {
+        batchEditNudged = true;
+        session.transcript.push({
+          role: "user",
+          content: batchEditNudge(overused, singleEditsByFile.get(overused) ?? 0),
+        });
+        await options.persist?.();
+      }
     }
   }
 

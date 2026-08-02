@@ -625,7 +625,7 @@ export function App() {
             if (e.agent) {
               enqueueReveal({ type: "subToolEnd", agentId: e.agent, toolId: e.id, ok: !e.error, summary: e.summary });
             } else {
-              enqueueReveal({ type: "toolEnd", toolId: e.id, ok: !e.error, summary: e.summary, detail: e.detail });
+              enqueueReveal({ type: "toolEnd", toolId: e.id, ok: !e.error, summary: e.summary, detail: e.detail, quiet: e.quiet });
             }
           } else if (e.type === "subagent" && e.phase === "start") {
             enqueueReveal({ type: "subagentStart", agentId: e.id, task: e.task, readOnly: e.readOnly });

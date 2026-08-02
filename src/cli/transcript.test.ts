@@ -88,6 +88,67 @@ test("a failed tool resolves to error status", () => {
   assert.equal((s.committed[0] as { status: string }).status, "error");
 });
 
+test("a QUIET failure leaves no row at all", () => {
+  // An old_string that matched two places is the agent adjusting its own aim, not news.
+  // Painting it red teaches the user that error rows are background noise, which is the
+  // one thing an error row must never become. The model still gets the full reason.
+  const s = run([
+    { type: "toolStart", toolId: "a", name: "Update", arg: "MINDWEAVE.md" },
+    { type: "toolEnd", toolId: "a", ok: false, summary: "matches 2 places", quiet: true },
+  ]);
+  assert.equal(s.committed.length, 0, "nothing committed");
+  assert.equal(s.tail.length, 0, "and nothing left hanging in the tail");
+});
+
+test("a quiet failure inside a group removes only that item", () => {
+  const s = run([
+    { type: "toolStart", toolId: "a", name: "Read", arg: "a.ts", group: true },
+    { type: "toolStart", toolId: "b", name: "Read", arg: "b.ts", group: true },
+    { type: "toolEnd", toolId: "a", ok: false, summary: "no match", quiet: true },
+    { type: "toolEnd", toolId: "b", ok: true, summary: "40 lines" },
+    { type: "finishReply" },
+  ]);
+  const group = [...s.committed, ...s.tail].find((b) => b.kind === "tools");
+  assert.ok(group && group.kind === "tools");
+  if (group && group.kind === "tools") {
+    assert.equal(group.items.length, 1, "the quiet item is gone");
+    assert.equal(group.items[0]!.toolId, "b");
+  }
+});
+
+test("a group whose only item went quiet disappears entirely", () => {
+  // Otherwise the user is left with an "Exploring… (0)" header, which is exactly the
+  // noise this removes, just phrased differently.
+  const s = run([
+    { type: "toolStart", toolId: "a", name: "Read", arg: "a.ts", group: true },
+    { type: "toolEnd", toolId: "a", ok: false, summary: "no match", quiet: true },
+    { type: "finishReply" },
+  ]);
+  assert.equal([...s.committed, ...s.tail].filter((b) => b.kind === "tools").length, 0);
+});
+
+test("a quiet failure does not block the tools behind it from draining", () => {
+  // The dropped row must not sit in the tail as an unfinished block, or every later
+  // tool queues behind a row that will never resolve.
+  const s = run([
+    { type: "toolStart", toolId: "a", name: "Update", arg: "a.ts" },
+    { type: "toolEnd", toolId: "a", ok: false, summary: "matches 2 places", quiet: true },
+    { type: "toolStart", toolId: "b", name: "Update", arg: "a.ts" },
+    { type: "toolEnd", toolId: "b", ok: true, summary: "1 replacement" },
+  ]);
+  assert.equal(s.committed.length, 1, "the successful retry is the only thing shown");
+  assert.equal((s.committed[0] as { status: string }).status, "ok");
+});
+
+test("an ordinary failure is still shown — quiet is not a blanket mute", () => {
+  const s = run([
+    { type: "toolStart", toolId: "a", name: "Run", arg: "npm test" },
+    { type: "toolEnd", toolId: "a", ok: false, summary: "exit 1" },
+  ]);
+  assert.equal(s.committed.length, 1);
+  assert.equal((s.committed[0] as { status: string }).status, "error");
+});
+
 test("drain keeps order — a finished later tool waits behind an unfinished earlier one", () => {
   const s = run([
     { type: "toolStart", toolId: "a", name: "Read", arg: "a.ts" },
