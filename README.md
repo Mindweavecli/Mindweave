@@ -193,7 +193,7 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 Useful to include: your OS and terminal, which model you were on, and the steps that led to it. If the agent did something odd rather than crashed, the transcript around it helps more than a description does.
 
 Especially worth reporting:
-- **Anything MCP.** It's new in v1.3, and it has only been tested against servers we wrote. Real servers will find edges we didn't.
+- **Anything MCP.** It's still young, and only one real published server has been driven end to end; resources and prompts have only been tested against servers we wrote. Real servers will find edges we didn't.
 - **A tool the agent was offered but couldn't call**, or one it insisted didn't exist.
 - **Anything on macOS or Linux.** Development happens on Windows; those two are believed to work but aren't verified.
 - **A prompt or menu that says something untrue.** Those can't crash and don't fail tests, so they survive until a person notices.
