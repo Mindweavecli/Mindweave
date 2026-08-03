@@ -11,11 +11,15 @@
  *   - `kill(id)`  — whole-tree kill.
  *   - `list()`    — running + finished shells (for the UI and /shells).
  *
- * Two ONE-SHOT, self-cleaning notification channels keep completions from leaking
+ * Two ONE-SHOT, self-cleaning event channels keep notifications from leaking
  * (avoiding the common footgun where finished jobs re-inject into the model forever):
- *   - `takeUiNotifications()` — finished shells not yet shown in the chat.
- *   - `drainCompleted()`      — finished shells not yet reported to the MODEL (with
- *                               a tail), so the model is told once, then never again.
+ *   - `takeUiEvents()` — shells that came up or stopped, not yet shown in the chat.
+ *   - `drainEvents()`  — the same for the MODEL, each with a tail of output, so it is
+ *                        told once and then never again.
+ *
+ * Every event is delivered. What varies is whether it INTERRUPTS the session: a stop
+ * the user caused arrives as background fact on the next turn rather than waking the
+ * model, which is what stops it reopening an app somebody just closed.
  *
  * Client-side, like the alternator lanes: it holds live process handles, never
  * crosses the engine↔brain wire. All children are killed on process exit.
