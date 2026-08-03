@@ -11,8 +11,17 @@ import assert from "node:assert/strict";
 import { promises as fs, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LspManager } from "./lsp.js";
+import { LspManager, filesToOpen } from "./lsp.js";
 import { CodeChassis } from "./index.js";
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function tsProject(): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "mindweave-lsp-"));
@@ -56,6 +65,75 @@ test("LspManager resolves Python symbols via bundled pyright", { timeout: 45_000
   } finally {
     await lsp.dispose();
   }
+});
+
+// ── Teardown actually reaps the server ──────────────────────────────────────
+
+test("shutdown leaves no language server running", { timeout: 45_000 }, async () => {
+  const dir = await tsProject();
+  const lsp = new LspManager(dir);
+  lsp.noteFile(join(dir, "src/util.ts"));
+  await lsp.symbols("helper"); // forces a real launch
+
+  const pids = lsp.pids();
+  assert.ok(pids.length > 0, "a server should have been launched");
+  assert.ok(pids.every(alive), "servers should be running before shutdown");
+
+  await lsp.shutdown();
+
+  const survivors = pids.filter(alive);
+  assert.deepEqual(survivors, [], `servers still alive after shutdown: ${survivors.join(", ")}`);
+});
+
+test("a disposed manager refuses to launch anything new", { timeout: 45_000 }, async () => {
+  const dir = await tsProject();
+  const lsp = new LspManager(dir);
+  lsp.noteFile(join(dir, "src/util.ts"));
+  await lsp.shutdown();
+
+  // A query arriving after teardown must not resurrect a server that nothing
+  // will ever reap: the session it belonged to is gone.
+  const syms = await lsp.symbols("helper");
+  assert.deepEqual(syms, []);
+  assert.deepEqual(lsp.pids(), []);
+});
+
+// ── The open-document bound ─────────────────────────────────────────────────
+
+const KEY = "ts";
+const tsKey = () => KEY;
+
+test("filesToOpen bounds a single call, so one query can't stall", () => {
+  const known = Array.from({ length: 500 }, (_, i) => `f${i}.ts`);
+  const picked = filesToOpen(known, new Set(), KEY, tsKey);
+  assert.equal(picked.length, 50);
+});
+
+test("filesToOpen bounds the SESSION, not just each call", () => {
+  // The bug: `opened` was ignored for the ceiling, so every query opened another
+  // batch and a long session fed the whole repo to the server, 50 files at a time.
+  const known = Array.from({ length: 5000 }, (_, i) => `f${i}.ts`);
+  const opened = new Set<string>();
+  let rounds = 0;
+  for (;;) {
+    const picked = filesToOpen(known, opened, KEY, tsKey);
+    if (picked.length === 0) break;
+    for (const p of picked) opened.add(p);
+    if (++rounds > 500) break; // safety: an unbounded impl would spin to 5000
+  }
+  assert.equal(opened.size, 300, "total open documents must stop at the ceiling");
+  assert.ok(rounds < 500, "the loop must terminate on the cap, not on the file list");
+});
+
+test("filesToOpen skips already-open files and other servers' files", () => {
+  const opened = new Set(["a.ts"]);
+  const picked = filesToOpen(["a.ts", "b.ts", "c.py"], opened, KEY, (p) => (p.endsWith(".ts") ? KEY : "py"));
+  assert.deepEqual(picked, ["b.ts"]);
+});
+
+test("filesToOpen returns nothing once the ceiling is already reached", () => {
+  const opened = new Set(Array.from({ length: 300 }, (_, i) => `o${i}.ts`));
+  assert.deepEqual(filesToOpen(["new.ts"], opened, KEY, tsKey), []);
 });
 
 test("CodeChassis with LSP returns resolved confidence", { timeout: 45_000 }, async () => {

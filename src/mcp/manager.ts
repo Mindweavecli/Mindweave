@@ -679,6 +679,19 @@ export class McpManager {
     live.delete(this);
     await Promise.all(closing);
   }
+
+  /**
+   * Teardown for a process-exit handler, where nothing can be awaited.
+   *
+   * `close(true)` reaps a shelled server with a blocking kill; the synchronous
+   * part of each close runs before this returns, which is all the exit handler
+   * gets. The returned promises are deliberately dropped.
+   */
+  disposeSync(): void {
+    for (const c of this.connections.values()) void c.close(true).catch(() => {});
+    this.connections.clear();
+    live.delete(this);
+  }
 }
 
 /**
@@ -705,6 +718,7 @@ function registerCleanup(): void {
   if (cleanupRegistered) return;
   cleanupRegistered = true;
   process.once("exit", () => {
-    for (const manager of live) void manager.dispose();
+    // Synchronous kill: an async one never reaches the OS from here.
+    for (const manager of [...live]) manager.disposeSync();
   });
 }

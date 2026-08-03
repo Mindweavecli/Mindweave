@@ -35,8 +35,10 @@ export interface Transport {
   request(method: string, params?: Record<string, unknown>): Promise<unknown>;
   /** Fire-and-forget notification (no id, no reply). */
   notify(method: string, params?: Record<string, unknown>): void;
-  /** Release the underlying resource. Idempotent. */
-  close(): Promise<void>;
+  /** Release the underlying resource. Idempotent.
+   *  `sync` asks for a blocking kill, required when closing from a process-exit
+   *  handler; transports with nothing to reap may ignore it. */
+  close(sync?: boolean): Promise<void>;
   /** Resolves when the transport dies on its own (process exit, socket close). */
   readonly closed: Promise<void>;
 

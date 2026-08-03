@@ -332,14 +332,31 @@ export class CodeChassis implements Chassis {
     };
   }
 
-  /** Stop background reconciling and shut down language servers. Body is
-   *  synchronous so it can run from a process-exit handler. */
+  /**
+   * Stop background reconciling and shut language servers down gracefully
+   * (LSP `shutdown` then `exit`, then the kill as a backstop). Use this whenever
+   * there is still an event loop: session swap, removing a root, `/continue`.
+   */
   async dispose(): Promise<void> {
+    this.stopTimer();
+    await this.lsp?.shutdown();
+  }
+
+  /**
+   * The same teardown with no awaiting anywhere, for a process-exit handler.
+   * Node runs no async work during `exit`, so the graceful path cannot be used
+   * there and would silently do nothing.
+   */
+  disposeSync(): void {
+    this.stopTimer();
+    this.lsp?.dispose();
+  }
+
+  private stopTimer(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.lsp?.dispose();
   }
 
   /** The underlying graph (used by the lane's watcher). */

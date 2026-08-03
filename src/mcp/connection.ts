@@ -436,8 +436,9 @@ export class McpConnection {
     this.retryTimer = null;
   }
 
-  /** Tear down the transport but keep this connection revivable. */
-  private async closeTransport(): Promise<void> {
+  /** Tear down the transport but keep this connection revivable.
+   *  `sync` is forwarded so an exit-handler teardown kills synchronously. */
+  private async closeTransport(sync = false): Promise<void> {
     const transport = this.transport;
     this.transport = null;
     this.negotiated = null;
@@ -447,14 +448,20 @@ export class McpConnection {
     this.templateDefs = [];
     this.toolsFetchedAt = 0;
     this.resourcesFetchedAt = 0;
-    if (transport) await transport.close().catch(() => {});
+    if (transport) await transport.close(sync).catch(() => {});
   }
 
-  /** Shut down for good: no more retries, no more tools. */
-  async close(): Promise<void> {
+  /**
+   * Shut down for good: no more retries, no more tools.
+   *
+   * `sync` must be set when closing from a process-exit handler. The kill that
+   * reaps a shelled server spawns `taskkill`, and an async spawn never reaches
+   * the OS during exit, so the server would outlive us.
+   */
+  async close(sync = false): Promise<void> {
     this.closed = true;
     this.clearRetry();
-    await this.closeTransport();
+    await this.closeTransport(sync);
   }
 }
 

@@ -23,9 +23,30 @@ import {
 import { languageIdFor, serverFor, specForLanguage, type ServerSpec } from "./servers.js";
 import type { CodeDiagnostic, SymbolKind } from "./types.js";
 import { flattenDocSymbols, pickNearest, type LineSpan, type RawDocSymbol } from "../../tools/spanCore.js";
+import { killTreeSync } from "../../tools/killTree.js";
 
 const INIT_TIMEOUT = 15_000;
 const REQUEST_TIMEOUT = 10_000;
+/** How long to wait for a server's `shutdown` reply before killing it anyway. */
+const SHUTDOWN_TIMEOUT = 2_000;
+
+/**
+ * Ceiling on documents held open in ONE server, across the whole session.
+ *
+ * `ensureProjectOpen` opens files so `workspace/symbol` has something indexed.
+ * Its per-call limit bounds one query's latency but not the total: every query
+ * opened another batch, so a long session pushed the entire project into the
+ * server one query at a time, and each open sends the file's full text.
+ *
+ * 300 is a judgment call, not a measurement. The first open already loads the
+ * enclosing tsconfig/venv project, which is what makes symbol search work at
+ * all; the rest is coverage for files outside it. 300 is comfortably above the
+ * per-call batch and far below a repo. Revisit it if someone measures where
+ * symbol recall actually stops improving.
+ */
+const MAX_OPEN_DOCS = 300;
+/** Documents opened in a single `ensureProjectOpen` call, to bound its latency. */
+const OPEN_BATCH = 50;
 
 export interface LspSymbol {
   name: string;
@@ -45,11 +66,21 @@ interface Session {
   opened: Set<string>;
 }
 
+/**
+ * A spawned server plus how it was spawned. `shelled` matters at kill time: a
+ * shelled child is `cmd.exe`, not the server, so killing the handle leaves the
+ * real server running. Same orphan the MCP stdio transport already guards.
+ */
+interface Tracked {
+  proc: ChildProcess;
+  shelled: boolean;
+}
+
 export class LspManager {
   private sessions = new Map<string, Promise<Session | null>>();
   private languages = new Set<string>();
   private files = new Set<string>();
-  private procs: ChildProcess[] = [];
+  private procs: Tracked[] = [];
   private disposed = false;
   /** Latest diagnostics per file (forward-slashed path), from publishDiagnostics. */
   private diagnosticsByFile = new Map<string, RawDiagnostic[]>();
@@ -187,12 +218,74 @@ export class LspManager {
     return (this.diagnosticsByFile.get(key) ?? []).map((d) => toCodeDiagnostic(key, d));
   }
 
-  /** Kill all language servers. Synchronous so it can run in a process-exit
-   *  handler; tracked child processes are killed directly (no awaiting). */
+  /** Process ids of the servers currently tracked. Lets a caller (and the tests)
+   *  check that teardown actually reaped them, rather than that it returned. */
+  pids(): number[] {
+    return this.procs.map((t) => t.proc.pid).filter((p): p is number => p !== undefined);
+  }
+
+  /**
+   * Ask every server to stop the way the protocol says to, then kill it.
+   *
+   * LSP requires `shutdown` (a request), waiting for its reply, then the `exit`
+   * notification. Killing the pipe instead is what leaves a server holding its
+   * index, and some servers never exit at all without it. Each server gets a
+   * short budget; anything slower is killed rather than waited on, because
+   * disposal must not be able to hang a session swap.
+   *
+   * Use this wherever there is still an event loop. The exit handler cannot
+   * await, so it calls `dispose()` directly.
+   */
+  async shutdown(): Promise<void> {
+    this.disposed = true;
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    await Promise.all(
+      sessions.map(async (pending) => {
+        let session: Session | null = null;
+        try {
+          session = await pending;
+        } catch {
+          return; // never started
+        }
+        if (!session) return;
+        try {
+          await withTimeout(session.conn.sendRequest("shutdown"), SHUTDOWN_TIMEOUT);
+        } catch {
+          // Too slow, or already dead. Still send `exit`; the kill is the backstop.
+        }
+        try {
+          await session.conn.sendNotification("exit");
+        } catch {
+          // The server can close the pipe the instant it exits, so a failed write
+          // here is the expected case, not an error.
+        }
+        // Tear the connection down BEFORE killing. Left listening, its writer can
+        // flush a queued frame into a pipe the exiting server already closed, which
+        // surfaces as an unhandled EPIPE with nothing left to catch it.
+        try {
+          session.conn.dispose();
+        } catch {
+          /* already disposed */
+        }
+      }),
+    );
+    this.dispose();
+  }
+
+  /**
+   * Kill all language servers. Synchronous, so it also works from a process-exit
+   * handler, where Node runs no async work at all.
+   *
+   * A shelled server (a Windows `.cmd` shim, which is how npm-installed servers
+   * arrive) is `cmd.exe` and not the server itself, so `proc.kill()` there kills
+   * the wrapper and orphans the real process. Those go through `killTreeSync`.
+   */
   dispose(): void {
     this.disposed = true;
-    for (const proc of this.procs) {
+    for (const { proc, shelled } of this.procs) {
       try {
+        if (shelled) killTreeSync(proc.pid);
         proc.kill();
       } catch {
         /* already gone */
@@ -203,6 +296,18 @@ export class LspManager {
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
+
+  /** Kill one server and stop tracking it. */
+  private kill(proc: ChildProcess, shelled: boolean): void {
+    this.procs = this.procs.filter((t) => t.proc !== proc);
+    try {
+      if (shelled) killTreeSync(proc.pid);
+      proc.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+
   private distinctSpecs(): ServerSpec[] {
     const byKey = new Map<string, ServerSpec>();
     for (const lang of this.languages) {
@@ -238,8 +343,17 @@ export class LspManager {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
         });
-    if (!proc.stdout || !proc.stdin) return null;
-    this.procs.push(proc);
+    // Track BEFORE any early return: a process we spawned but never recorded is
+    // one `dispose()` can never reach, and it outlives the session.
+    this.procs.push({ proc, shelled: winShim });
+    if (!proc.stdout || !proc.stdin) {
+      try {
+        proc.kill();
+      } catch {
+        /* already gone */
+      }
+      return null;
+    }
     const conn = createMessageConnection(
       new StreamMessageReader(proc.stdout),
       new StreamMessageWriter(proc.stdin),
@@ -254,28 +368,33 @@ export class LspManager {
     conn.listen();
 
     const rootUri = pathToFileURL(this.root).toString();
-    await withTimeout(
-      conn.sendRequest("initialize", {
-        processId: process.pid,
-        rootUri,
-        capabilities: {},
-        workspaceFolders: [{ uri: rootUri, name: "root" }],
-      }),
-      INIT_TIMEOUT,
-    );
+    try {
+      await withTimeout(
+        conn.sendRequest("initialize", {
+          processId: process.pid,
+          rootUri,
+          capabilities: {},
+          workspaceFolders: [{ uri: rootUri, name: "root" }],
+        }),
+        INIT_TIMEOUT,
+      );
+    } catch (err) {
+      // A server that never finished initializing is unreachable from here on
+      // (the session caches null and nothing retries), but it is very much still
+      // running and indexing. Abandoning it leaves it burning CPU for the rest of
+      // the session, so kill it on the way out rather than waiting for dispose.
+      this.kill(proc, winShim);
+      throw err;
+    }
     conn.sendNotification("initialized", {});
     return { conn, proc, opened: new Set() };
   }
 
   /** Open the noted files this server handles, so the project is loaded/indexed.
-   *  Bounded — one open loads the tsconfig project; we open a few for coverage. */
+   *  Bounded per call AND across the session — see `filesToOpen`. */
   private async ensureProjectOpen(session: Session, spec: ServerSpec): Promise<void> {
-    let opened = 0;
-    for (const path of this.files) {
-      if (opened >= 50) break;
-      if (serverFor(path)?.key !== spec.key || session.opened.has(path)) continue;
+    for (const path of filesToOpen(this.files, session.opened, spec.key)) {
       await this.didOpen(session, path);
-      opened++;
     }
   }
 
@@ -370,6 +489,35 @@ function symbolKind(k: number): SymbolKind {
     default:
       return "other";
   }
+}
+
+/**
+ * Which files to open for one server on this call, bounded two ways.
+ *
+ * `OPEN_BATCH` bounds a single query's latency (each open reads a file and ships
+ * its whole text). `MAX_OPEN_DOCS` bounds the SESSION: without it every query
+ * opened a fresh batch, so a long session fed the entire repo to the server one
+ * query at a time, and nothing ever closed a document. The per-call limit alone
+ * reads like a bound and is not one.
+ *
+ * Pure so the bound is testable without spawning a language server.
+ */
+export function filesToOpen(
+  known: Iterable<string>,
+  opened: ReadonlySet<string>,
+  specKey: string,
+  serverKeyFor: (path: string) => string | undefined = (p) => serverFor(p)?.key,
+): string[] {
+  const room = MAX_OPEN_DOCS - opened.size;
+  if (room <= 0) return [];
+  const budget = Math.min(room, OPEN_BATCH);
+  const out: string[] = [];
+  for (const path of known) {
+    if (out.length >= budget) break;
+    if (serverKeyFor(path) !== specKey || opened.has(path)) continue;
+    out.push(path);
+  }
+  return out;
 }
 
 function withTimeout<T>(p: Thenable<T>, ms: number): Promise<T> {

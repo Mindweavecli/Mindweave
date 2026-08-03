@@ -16,7 +16,7 @@
  *     reason is almost always on stderr and is otherwise lost.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { killTree } from "../../tools/killTree.js";
+import { killTree, killTreeSync } from "../../tools/killTree.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS, RpcError, type Notification, type Transport } from "./types.js";
 
 /** How much of the child's stderr to keep for diagnostics. */
@@ -244,14 +244,16 @@ export class StdioTransport implements Transport {
     this.resolveClosed();
   }
 
-  async close(): Promise<void> {
+  async close(sync = false): Promise<void> {
     if (!this.disposed) this.die(new Error("mcp transport closed"));
     try {
       // A shelled child is `cmd.exe`, not the server. Killing it leaves the real server
       // — a node or python process holding a port, a lock, or an API session — running
       // after Mindweave exits, which is exactly the orphan the shell tools already use
       // `killTree` to avoid. POSIX spawns directly, so there is nothing in between.
-      if (this.shelled) killTree(this.proc.pid);
+      // From a process-exit handler the async spawn never reaches the OS, so that
+      // path has to block instead.
+      if (this.shelled) (sync ? killTreeSync : killTree)(this.proc.pid);
       this.proc.kill();
     } catch {
       // Already gone.

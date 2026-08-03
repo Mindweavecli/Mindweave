@@ -53,12 +53,17 @@ export async function stopChassis(chassis: Chassis | undefined): Promise<void> {
   await chassis?.dispose?.();
 }
 
-/** Kill any language servers on process exit (best-effort, synchronous). */
+/**
+ * Kill any language servers on process exit.
+ *
+ * This MUST be the synchronous teardown. Node runs no async work during `exit`,
+ * so the graceful `dispose()` would return a promise nobody can await and the
+ * servers would simply survive. `disposeSync` finishes inside the handler.
+ */
 function registerCleanup(): void {
   if (cleanupRegistered) return;
   cleanupRegistered = true;
-  const killAll = () => {
-    for (const c of active) void c.dispose();
-  };
-  process.once("exit", killAll);
+  process.once("exit", () => {
+    for (const c of active) c.disposeSync();
+  });
 }
