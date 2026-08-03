@@ -79,7 +79,7 @@ That is the short version. The full statement of how this project is run, why th
 
 The method is deliberately unglamorous. Take a subsystem that is already shipped and already has passing tests, read it fresh on the assumption it is wrong, and go looking for the failure shapes this project has been bitten by before, which are written down in [BOUNDARY.md](BOUNDARY.md). The last two passes each found real defects in code with hundreds of green tests. Reproductions from your own machine are worth more here than anything else, because most of what turns up only appears when the thing is genuinely run.
 
-Known MCP gaps, parked until the core is where it needs to be:
+Known MCP gaps, which are not being worked on right now:
 
 * **OAuth for remote servers.** Servers needing authorization report `needs-auth` and stop there. The largest remaining MCP piece and the hardest to verify, since it needs a real identity provider to test against.
 * **Multi-round tool requests and elicitation.** A server that needs extra input mid-call cannot ask for it yet.
