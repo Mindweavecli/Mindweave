@@ -37,7 +37,7 @@ import { killTree } from "./killTree.js";
 import { relativize } from "./paths.js";
 import { outputDetail } from "./detail.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
-import { findRunningDuplicate, isInteractiveServerCommand } from "./backgroundShells.js";
+import { findRunningDuplicate, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -48,6 +48,9 @@ type Shell = "powershell" | "cmd";
 const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes
 const MAX_TIMEOUT_MS = 600_000; // 10 minutes
 const MAX_OUTPUT_CHARS = 30_000;
+/** How long to wait after `exit` for `close` before settling anyway. See the listener
+ *  in runShell: a surviving grandchild can hold the output pipe open forever. */
+const CLOSE_GRACE_MS = 2_000;
 
 /** Human label for the shell, kept in sync with the system prompt. */
 export function commandShellLabel(): string {
@@ -97,6 +100,17 @@ export const runCommand: Tool = {
       run_in_background: {
         type: "boolean",
         description: "Start it in the background immediately and return a shell id (don't wait).",
+      },
+      notify: {
+        type: "string",
+        enum: ["on_finish", "on_failure", "never"],
+        description:
+          "What you want to be told about a backgrounded command. 'on_finish' (default for tasks): " +
+          "you're told when it ends, whatever the result — use it for builds, tests, installs, " +
+          "anything whose RESULT is the point. 'on_failure': you're told when it has come up, and if " +
+          "it never does, but NOT when it stops — use it for dev servers and apps, because the user " +
+          "closing their own app is not something to act on. 'never': you're told nothing at all. " +
+          "Say which; guessing from the command name gets it wrong for anything unusual.",
       },
     },
   },
@@ -151,16 +165,22 @@ export const runCommand: Tool = {
 
     const shell: Shell = args.shell === "cmd" ? "cmd" : "powershell";
 
-    // Already-running server guard: don't launch a dev server / app that's already up.
-    // Starting a second copy collides on the port, and the model then wastes a long loop
-    // fighting the conflict it created. The completion path still reports the live one.
-    if (isInteractiveServerCommand(command) && ctx.backgroundShells) {
+    // Already-running guard: don't start a second copy of something already running in
+    // the background. Two dev servers collide on a port and the model then burns a long
+    // loop fighting the conflict it created; two of anything else is nearly always a
+    // mistake too.
+    //
+    // This deliberately does NOT ask whether the command looks like a server. It used to,
+    // which meant the guard only covered the names in one regex: `cargo run`,
+    // `docker compose up`, `flask run` and a plain path to a binary were all unprotected.
+    // "Is this exact command already running" needs no such guess and covers everything.
+    if (ctx.backgroundShells) {
       const dup = findRunningDuplicate(ctx.backgroundShells.running(), command);
       if (dup) {
         return {
           output:
             `\`${clip(command)}\` is already running in the background as shell #${dup.id}, so I'm not ` +
-            `starting a second copy — that would collide on the same port. It's already up; if you want a ` +
+            `starting a second copy — a second one would collide with it. It's already up; if you want a ` +
             `fresh start, call kill_shell(${dup.id}) first, then relaunch.`,
           isError: true,
           summary: `already running as shell #${dup.id}`,
@@ -179,7 +199,11 @@ export const runCommand: Tool = {
       if (reserved) return fail(reserved);
     }
 
-    return runShell(command, ctx, timeout, args.run_in_background === true, shell);
+    const declared =
+      args.notify === "on_finish" || args.notify === "on_failure" || args.notify === "never"
+        ? (args.notify as NotifyPolicy)
+        : undefined;
+    return runShell(command, ctx, timeout, args.run_in_background === true, shell, declared);
   },
 };
 
@@ -189,6 +213,7 @@ async function runShell(
   timeoutMs: number,
   background: boolean,
   shell: Shell,
+  declaredNotify?: NotifyPolicy,
 ): Promise<ToolResult> {
   // A unique temp file the wrapped command writes its final cwd into.
   const cwdFile = join(tmpdir(), `mindweave-cwd-${randomBytes(6).toString("hex")}.txt`);
@@ -229,8 +254,10 @@ async function runShell(
         summary: `interrupted \`${clip(command)}\``,
       };
     }
-    const info = mgr.adopt(child, { command, cwd: ctx.cwd, cwdFile });
-    return backgroundedResult(info.id, command, `Started in the background as shell #${info.id}`);
+    // Declared policy wins; the name guess is only the default when nothing was said.
+    const notify = declaredNotify ?? guessNotifyPolicy(command);
+    const info = mgr.adopt(child, { command, cwd: ctx.cwd, cwdFile, notify });
+    return backgroundedResult(info.id, command, `Started in the background as shell #${info.id}`, notify);
   }
 
   return new Promise<ToolResult>((resolve) => {
@@ -260,12 +287,16 @@ async function runShell(
         detachAbort();
         child.stdout?.off("data", collect);
         child.stderr?.off("data", collect);
-        const info = mgr.adopt(child, { command, cwd: ctx.cwd, initial: output, cwdFile });
+        // Auto-backgrounded after running too long inline. Somebody was waiting on this,
+        // so its completion is the point unless the caller said otherwise.
+        const notify = declaredNotify ?? "on_finish";
+        const info = mgr.adopt(child, { command, cwd: ctx.cwd, initial: output, cwdFile, notify });
         resolve(
           backgroundedResult(
             info.id,
             command,
             `Still running after ${Math.round(timeoutMs / 1000)}s — moved to the background as shell #${info.id}`,
+            notify,
           ),
         );
       } else {
@@ -300,14 +331,14 @@ async function runShell(
     if (signal?.aborted) return void onAbort();
     signal?.addEventListener("abort", onAbort);
 
-    const finish = async (exitCode: number | null) => {
+    const finish = async (exitCode: number | null, signal: string | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       detachAbort();
       await applyCwd(cwdFile, ctx);
       if (tempFile) await fs.rm(tempFile, { force: true }).catch(() => {});
-      resolve(format(command, ctx, output, truncated, timedOut, exitCode, timeoutMs, shell, cwdBefore));
+      resolve(format(command, ctx, output, truncated, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore));
     };
 
     child.on("error", (error) => {
@@ -319,18 +350,46 @@ async function runShell(
       if (tempFile) void fs.rm(tempFile, { force: true }).catch(() => {});
       resolve(fail(`could not start the command: ${error.message}`));
     });
-    child.on("close", (code) => void finish(code));
+    child.on("close", (code, signal) => void finish(code, signal));
+    // `close` waits for every stdio stream to close, which a surviving grandchild (a
+    // daemon the command started, inheriting stdout) holds open indefinitely. Without a
+    // fallback the call sits here until the timeout and only then gets backgrounded, so a
+    // command that merely starts something looks like it took two minutes. `exit` fires
+    // when the process itself goes; the short grace lets `close` win normally, so no
+    // ordinary command pays for this.
+    child.on("exit", (code, signal) => {
+      const grace = setTimeout(() => void finish(code, signal), CLOSE_GRACE_MS);
+      grace.unref?.();
+    });
   });
 }
 
-/** The result returned when a command is (or becomes) a background shell. */
-function backgroundedResult(id: number, command: string, lead: string): ToolResult {
+/**
+ * The result returned when a command is (or becomes) a background shell.
+ *
+ * The text has to match what will ACTUALLY happen, and that differs by what was
+ * started. A finite task notifies on completion, so telling the model to promise a
+ * report is correct. A server or app does NOT: its stop is suppressed on purpose,
+ * because a user closing their own app is not something to act on. Telling the model
+ * it would be notified either way made it promise a report that never came, which is
+ * the prompt asserting a capability that does not exist.
+ */
+function backgroundedResult(id: number, command: string, lead: string, notify: NotifyPolicy): ToolResult {
+  const tail =
+    notify === "never"
+      ? `Nothing further will be reported about it. Say in ONE short line that it's running, then STOP ` +
+        `(end your turn). Use shell_output(${id}) to inspect it and kill_shell(${id}) to stop it.`
+      : notify === "on_failure"
+        ? `You WILL be told once it has come up, so you can report that. You will NOT be told when it ` +
+          `stops, because the user closing their own app is not an event to act on — so never restart ` +
+          `it on your own. Say in ONE short line that it's starting, then STOP (end your turn). Use ` +
+          `shell_output(${id}) to inspect it and kill_shell(${id}) to stop it.`
+        : `You will be notified AUTOMATICALLY the moment it finishes, so do NOT poll it. Say in ONE ` +
+          `short line that it started and that you'll report back when it's done, then STOP (end your ` +
+          `turn). Only call shell_output(${id}) if you have a specific reason to inspect partial ` +
+          `output; use kill_shell(${id}) to stop it.`;
   return {
-    output:
-      `${lead}. It is running in the background and you will be notified AUTOMATICALLY the moment it ` +
-      `finishes — so do NOT poll it. Tell the user in ONE short line that it's started and that you'll ` +
-      `report back when it's ready, then STOP (end your turn). Only call shell_output(${id}) if you have a ` +
-      `specific reason to inspect partial output; use kill_shell(${id}) to stop it.`,
+    output: `${lead}. ${tail}`,
     summary: `bg shell #${id}: ${clip(command)}`,
   };
 }
@@ -433,6 +492,7 @@ function format(
   truncated: boolean,
   timedOut: boolean,
   exitCode: number | null,
+  signal: string | null,
   timeoutMs: number,
   shell: Shell,
   cwdBefore: string,
@@ -445,6 +505,11 @@ function format(
       `Command timed out after ${Math.round(timeoutMs / 1000)}s and was killed. ` +
         `If it was a long-running or watching process, run a form that terminates.`,
     );
+  } else if (signal) {
+    // A process ended by a signal reports no exit code at all. Treating that as "not
+    // non-zero" made a killed command read as a success, and the summary said
+    // "exit null" — so a command someone stopped looked like a command that worked.
+    parts.push(`Command was terminated by ${signal} before it finished.`);
   } else if (exitCode !== 0 && exitCode !== null) {
     parts.push(`Command exited with code ${exitCode}.`);
   }
@@ -469,10 +534,10 @@ function format(
   // OUTPUT — the summary line below is display-only and never reaches the model.
   const moved = cwdChangeNote(cwdBefore, ctx.cwd, shown);
   if (moved) parts.push(moved);
-  const status = timedOut ? "timed out" : exitCode === 0 ? "ok" : `exit ${exitCode}`;
+  const status = timedOut ? "timed out" : signal ? `killed (${signal})` : exitCode === 0 ? "ok" : `exit ${exitCode}`;
   return {
     output: parts.join("\n"),
-    isError: timedOut || (exitCode !== 0 && exitCode !== null),
+    isError: timedOut || signal !== null || (exitCode !== 0 && exitCode !== null),
     summary: `ran \`${clip(command)}\` in ${shown} (${status})`,
     detail: outputDetail(body),
   };

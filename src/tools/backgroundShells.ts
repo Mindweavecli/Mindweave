@@ -57,15 +57,50 @@ const EXIT_GRACE_MS = 2_000;
 export type ShellStatus = "running" | "exited" | "killed";
 
 /**
+ * What the caller wants to hear about, declared when the command is started.
+ *
+ * This replaces guessing from the command string. The old heuristic matched a list of
+ * dev-server names, so `cargo run`, `docker compose up`, `flask run` and a plain path
+ * to a binary were all mistaken for finite tasks. A caller knows which it is; a regex
+ * can only ever know the names someone thought of.
+ *
+ *   - `on_finish`  — tell me when it ends, however it ends. Builds, tests, installs:
+ *                    the result IS the point.
+ *   - `on_failure` — tell me when it comes up, and if it never does. A normal stop is
+ *                    silent, because someone closing their own app is not an event to
+ *                    act on. Servers and apps.
+ *   - `never`      — say nothing, ever. Start it and forget it.
+ */
+export type NotifyPolicy = "on_finish" | "on_failure" | "never";
+
+/** Who stopped a shell, when somebody did. Absent means it ended on its own. */
+export type StopActor = "agent" | "user";
+
+/** The two things that can be worth telling the model about a background shell. */
+export type ShellEventKind = "ready" | "ended";
+
+/**
+ * Guess a notify policy from the command, for callers that did not declare one.
+ *
+ * This is a FALLBACK, not the decision. The policy is declared at call time; this only
+ * picks a default when nothing was said, so a caller that forgets does not regress to
+ * "reopen the app the user just closed". Being a list of names, it is wrong for
+ * everything nobody thought of (`cargo run`, `docker compose up`, `flask run`, a plain
+ * path to a binary) — which is exactly why it is no longer the authority.
+ */
+export function guessNotifyPolicy(command: string): NotifyPolicy {
+  return isInteractiveServerCommand(command) ? "on_failure" : "on_finish";
+}
+
+/**
  * Is this command a dev server / interactive app — something that runs until stopped,
  * where "it exited" means the USER closed it, NOT that a task finished? (pure/tested)
  *
- * This is the type-awareness the background system was missing: a finite task (build,
- * test, lint) that finishes IS a result worth surfacing to the model, but a dev server
- * (`tauri dev`, `vite`, `npm run dev`) exiting cleanly is just the user closing their
- * app — reacting to it makes the model "helpfully" reopen the thing they just closed.
- * `build` variants (`vite build`, `tauri build`) are finite tasks, so they're excluded
- * even though they share a runner name.
+ * Only used now to pick a default (see `guessNotifyPolicy`). A finite task (build,
+ * test, lint) that finishes IS a result worth surfacing, but a dev server exiting is
+ * just the user closing their app, and reacting to it makes the model reopen the thing
+ * they just closed. `build` variants are finite tasks, so they're excluded even though
+ * they share a runner name.
  */
 export function isInteractiveServerCommand(command: string): boolean {
   const c = command.toLowerCase();
@@ -79,37 +114,40 @@ export function isInteractiveServerCommand(command: string): boolean {
 }
 
 /**
- * Should a finished shell WAKE THE MODEL? (pure/tested)
+ * Should a finished shell INTERRUPT the user with a turn? (pure/tested)
  *
- * The old rule was `interactive && (killed || code === 0)`, which assumed a closed app
- * exits 0. Measured, it does not: `taskkill /T` (what `/shells`, `killTree`, and
- * closing a console app all amount to) reports **code 1**, and SIGTERM/SIGINT report
- * `code null`. Three of the four ways an app can end therefore fell through, the model
- * was told its dev server had "failed", and it restarted the thing the user had just
- * closed — every time, forever.
+ * Note the narrow question. This does NOT decide whether the model is told: it is
+ * always told (see `drainEvents`). Swallowing the event was the real defect — the
+ * model could not say "your app stopped", and if asked why the app was down it had
+ * nothing. This decides only whether the stop is worth breaking into the session for.
  *
- * The rule now asks what actually happened rather than reading a number that means
- * different things on different platforms:
+ * The rule, in the user's words: don't reopen something they closed, unless it
+ * crashed before they ever got to see it.
  *
- *   - a finite task (build, test, lint) always reports: its result is the whole point
- *   - we killed it ourselves → the agent or the user did that on purpose, say nothing
- *   - a signal ended it → SIGTERM/SIGINT is someone stopping it, not a crash
- *   - a clean exit 0 → it stopped on its own terms
- *   - anything else → report ONLY if it died inside the startup grace, which is a
- *     server that never came up (port taken, bad config) and is worth surfacing
+ *   - `never` → nothing is ever worth interrupting for
+ *   - somebody killed it → the agent or the user did that on purpose, so they know
+ *   - `on_finish` → the result is the point, always interrupt
+ *   - a signal ended it → someone stopped it deliberately
+ *   - otherwise → interrupt ONLY if it never came up, because then the user never saw
+ *     it running and cannot know it failed
+ *
+ * Deliberately NOT consulted: the exit code and the duration. Exit status cannot tell
+ * these cases apart — measured on Windows, a closed app and a port conflict both report
+ * code 1, and a signalled process reports none at all. `cameUp` is the fact that
+ * actually separates them, and it is established in ONE place (the readiness timer)
+ * rather than recomputed here from a second set of numbers.
  */
-export function shouldNotifyModel(end: {
-  interactive: boolean;
+export function shouldWakeOnEnd(end: {
+  notify: NotifyPolicy;
   killed: boolean;
-  code: number | null;
   signal: string | null;
-  ranForMs: number;
+  cameUp: boolean;
 }): boolean {
-  if (!end.interactive) return true;
+  if (end.notify === "never") return false;
   if (end.killed) return false;
+  if (end.notify === "on_finish") return true;
   if (end.signal) return false;
-  if (end.code === 0) return false;
-  return end.ranForMs < STARTUP_GRACE_MS;
+  return !end.cameUp;
 }
 
 /**
@@ -135,13 +173,25 @@ export interface ShellInfo {
   cwd: string;
   status: ShellStatus;
   exitCode: number | null;
+  /** The signal that ended it, when one did. A signalled process has NO exit code, so
+   *  without this it reads as "exited null" — which is what a stopped app looked like. */
+  signal?: string;
   startedAt: number;
   finishedAt: number | null;
+  /** What this shell's caller asked to be told about. */
+  notify: NotifyPolicy;
+  /** Who stopped it, when somebody did. Absent means it ended on its own — which is
+   *  what lets the model say "you closed it" instead of assuming it crashed. */
+  stoppedBy?: StopActor;
+  /** It survived the startup grace, so it is up rather than merely spawned. */
+  ready: boolean;
 }
 
 export interface AdoptOptions {
   command: string;
   cwd: string;
+  /** What to tell the model about. Defaults to `guessNotifyPolicy(command)`. */
+  notify?: NotifyPolicy;
   /** Output already collected before the hand-off (foreground → background). */
   initial?: string;
   /** A temp cwd-file from run_command to clean up when the process ends. */
@@ -153,9 +203,12 @@ interface Entry extends ShellInfo {
   buffer: string; // retained output (capped)
   readOffset: number; // chars already handed out by read()
   truncated: boolean;
-  reported: boolean; // told to the model yet?
-  uiNotified: boolean; // shown in the chat yet?
-  interactive: boolean; // a dev server / app (exit = user closed it), not a finite task
+  reported: boolean; // end told to the model yet?
+  uiNotified: boolean; // end shown in the chat yet?
+  wakeOnEnd: boolean; // is that ending worth interrupting the session for?
+  readyReported: boolean; // "it came up" told to the model yet?
+  readyUiNotified: boolean; // "it came up" shown in the chat yet?
+  readyTimer: ReturnType<typeof setTimeout> | null;
   cwdFile?: string;
 }
 
@@ -192,13 +245,33 @@ export class BackgroundShells {
       buffer: "",
       readOffset: 0,
       truncated: false,
+      notify: opts.notify ?? guessNotifyPolicy(opts.command),
+      ready: false,
       reported: false,
       uiNotified: false,
-      interactive: isInteractiveServerCommand(opts.command),
+      wakeOnEnd: false,
+      readyReported: false,
+      readyUiNotified: false,
+      readyTimer: null,
       cwdFile: opts.cwdFile,
     };
     this.shells.set(id, entry);
     if (opts.initial) this.append(entry, opts.initial);
+
+    // The readiness signal. A server that is still alive after the startup grace has
+    // come up, and that is the one positive event worth reporting for something that
+    // never "finishes". Without it the model was told to promise a report it could not
+    // give: the only event it could ever receive was the end, which for a server is
+    // deliberately suppressed. Tasks don't need it — their event is completion.
+    if (entry.notify === "on_failure") {
+      entry.readyTimer = setTimeout(() => {
+        entry.readyTimer = null;
+        if (entry.status !== "running") return;
+        entry.ready = true;
+        this.emit();
+      }, STARTUP_GRACE_MS);
+      entry.readyTimer.unref?.();
+    }
 
     const collect = (chunk: Buffer) => this.append(entry, chunk.toString("utf8"));
     child.stdout?.on("data", collect);
@@ -230,26 +303,39 @@ export class BackgroundShells {
     }
   }
 
-  private onClose(entry: Entry, code: number | null, signal: string | null, killed: boolean): void {
+  private onClose(
+    entry: Entry,
+    code: number | null,
+    signal: string | null,
+    killed: boolean,
+    by?: StopActor,
+  ): void {
     if (entry.status !== "running") return;
     entry.status = killed ? "killed" : "exited";
     entry.exitCode = code;
+    if (signal) entry.signal = signal;
     entry.finishedAt = Date.now();
     entry.child = null;
-    // Decide whether this end is worth waking the model for. Marking it already
-    // reported is what stops the "reopen the app they just closed" loop. The UI still
-    // shows the stop either way (uiNotified is untouched), so the user always sees it.
-    if (
-      !shouldNotifyModel({
-        interactive: entry.interactive,
-        killed,
-        code,
-        signal,
-        ranForMs: entry.finishedAt - entry.startedAt,
-      })
-    ) {
-      entry.reported = true;
+    if (by) entry.stoppedBy = by;
+    if (entry.readyTimer) {
+      clearTimeout(entry.readyTimer);
+      entry.readyTimer = null;
     }
+    // A pending "it's up" must not fire after the thing has already stopped. Note this
+    // clears the PENDING notice, not `entry.ready`: whether it ever came up is the fact
+    // the wake decision below is built on, and it has to survive.
+    entry.readyReported = true;
+    entry.readyUiNotified = true;
+    // Whether this ending is worth interrupting for. It is NOT marked reported here:
+    // the model is always told (drainEvents), it just isn't always interrupted. Marking
+    // it reported is what used to delete the event outright, leaving the model unable
+    // to say the app had stopped at all.
+    entry.wakeOnEnd = shouldWakeOnEnd({
+      notify: entry.notify,
+      killed,
+      signal,
+      cameUp: entry.ready,
+    });
     if (entry.cwdFile) void fs.rm(entry.cwdFile, { force: true }).catch(() => {});
     this.emit();
   }
@@ -266,12 +352,18 @@ export class BackgroundShells {
     return { info: view(entry), chunk };
   }
 
-  /** Kill a running shell (whole tree). Returns false if it isn't running. */
-  kill(id: number): boolean {
+  /**
+   * Kill a running shell (whole tree). Returns false if it isn't running.
+   *
+   * `by` records WHO stopped it. Neither actor is woken about it, since both already
+   * know, but the difference is kept so the model can say "you stopped it" rather than
+   * guessing that it crashed.
+   */
+  kill(id: number, by: StopActor = "agent"): boolean {
     const entry = this.shells.get(id);
     if (!entry || entry.status !== "running" || !entry.child) return false;
     killTree(entry.child.pid);
-    this.onClose(entry, null, null, true);
+    this.onClose(entry, null, null, true, by);
     return true;
   }
 
@@ -284,31 +376,61 @@ export class BackgroundShells {
   runningCount(): number {
     return this.running().length;
   }
-  /** Finished shells the model hasn't been told about yet. */
+  /**
+   * Events worth INTERRUPTING for: a shell that just came up, or one that ended in a
+   * way the user cannot already know about.
+   *
+   * This is deliberately narrower than "events not yet told". A stop the user caused
+   * still gets delivered on the next turn (see `drainEvents`); it just doesn't break
+   * into the session, which is what stops the agent reopening a closed app.
+   */
   pendingCount(): number {
-    return [...this.shells.values()].filter((e) => e.status !== "running" && !e.reported).length;
+    return [...this.shells.values()].filter(
+      (e) => (e.status !== "running" && !e.reported && e.wakeOnEnd) || (e.ready && !e.readyReported),
+    ).length;
   }
 
-  /** One-shot for the UI: finished shells not yet shown in the chat. */
-  takeUiNotifications(): ShellInfo[] {
-    const out: ShellInfo[] = [];
+  /** One-shot for the UI: shells that came up or stopped and aren't in the chat yet. */
+  takeUiEvents(): { info: ShellInfo; kind: ShellEventKind }[] {
+    const out: { info: ShellInfo; kind: ShellEventKind }[] = [];
     for (const entry of this.shells.values()) {
+      if (entry.ready && !entry.readyUiNotified) {
+        entry.readyUiNotified = true;
+        out.push({ info: view(entry), kind: "ready" });
+      }
       if (entry.status !== "running" && !entry.uiNotified) {
         entry.uiNotified = true;
-        out.push(view(entry));
+        out.push({ info: view(entry), kind: "ended" });
       }
     }
     return out;
   }
 
-  /** One-shot for the MODEL: finished shells not yet reported, each with a tail of
-   *  output. Marked reported so they're never injected again. */
-  async drainCompleted(): Promise<{ info: ShellInfo; tail: string }[]> {
-    const out: { info: ShellInfo; tail: string }[] = [];
+  /**
+   * One-shot for the MODEL: EVERYTHING it hasn't been told, each with a tail of output.
+   *
+   * Every ending is delivered, including the ones not worth interrupting for. Those
+   * used to be deleted, which left the model unable to say an app had stopped, or to
+   * answer why it was down. `wake` carries whether this was the interrupting kind, so
+   * the caller can word it as news or as background fact.
+   *
+   * Both kinds go through this single channel, and both mark themselves so nothing is
+   * ever injected twice. That one-shot property is the whole reason background jobs
+   * don't slowly eat the context window, and it must survive any change here.
+   */
+  async drainEvents(): Promise<
+    { info: ShellInfo; kind: ShellEventKind; tail: string; wake: boolean }[]
+  > {
+    const out: { info: ShellInfo; kind: ShellEventKind; tail: string; wake: boolean }[] = [];
+    const tailOf = (entry: Entry) => entry.buffer.slice(Math.max(0, entry.buffer.length - TAIL_CHARS));
     for (const entry of this.shells.values()) {
+      if (entry.ready && !entry.readyReported) {
+        entry.readyReported = true;
+        out.push({ info: view(entry), kind: "ready", tail: tailOf(entry), wake: true });
+      }
       if (entry.status !== "running" && !entry.reported) {
         entry.reported = true;
-        out.push({ info: view(entry), tail: entry.buffer.slice(Math.max(0, entry.buffer.length - TAIL_CHARS)) });
+        out.push({ info: view(entry), kind: "ended", tail: tailOf(entry), wake: entry.wakeOnEnd });
       }
     }
     return out;
@@ -347,6 +469,10 @@ function view(e: Entry): ShellInfo {
     exitCode: e.exitCode,
     startedAt: e.startedAt,
     finishedAt: e.finishedAt,
+    notify: e.notify,
+    ready: e.ready,
+    ...(e.signal ? { signal: e.signal } : {}),
+    ...(e.stoppedBy ? { stoppedBy: e.stoppedBy } : {}),
   };
 }
 

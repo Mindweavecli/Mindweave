@@ -152,3 +152,50 @@ test("cwdChangeNote: coming back to the root reads as the root, not '.'", () => 
   assert.match(note, /now the project root/);
   assert.doesNotMatch(note, /now \./);
 });
+
+// ── What the background hand-off tells the model ────────────────────────────
+//
+// The text has to match what will actually happen. A finite task does notify on
+// completion; a server does not, because v1.5 suppresses that on purpose. Telling
+// the model it would be notified either way made it promise a report that never
+// came.
+
+test("a finite task is told it will be notified", { skip: !IS_WINDOWS, timeout: 12000 }, async () => {
+  const mgr = new BackgroundShells();
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const r = await runCommand.execute({ command: "npm run build", run_in_background: true }, c);
+  mgr.dispose();
+  assert.match(r.output, /notified AUTOMATICALLY/);
+  assert.match(r.output, /report back/);
+});
+
+test("a server is told it will NOT be notified, and not to restart it", { skip: !IS_WINDOWS, timeout: 12000 }, async () => {
+  const mgr = new BackgroundShells();
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const r = await runCommand.execute({ command: "npm run dev", run_in_background: true }, c);
+  mgr.dispose();
+  // It now has a real event to promise: readiness. What it must NOT claim is that it
+  // will hear about the stop, which is the notification that is suppressed on purpose.
+  assert.match(r.output, /WILL be told once it has come up/);
+  assert.match(r.output, /will NOT be told when it stops/);
+  assert.match(r.output, /never restart it/);
+  assert.doesNotMatch(r.output, /notified AUTOMATICALLY the moment it finishes/);
+});
+
+// ── The already-running guard covers every command, not a list of names ─────
+
+test("a second copy of the same command is refused, whatever it is", { skip: !IS_WINDOWS, timeout: 20000 }, async () => {
+  const mgr = new BackgroundShells();
+  const c = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  // Deliberately NOT a name the dev-server regex knows: this is the case that used
+  // to slip through (cargo run, docker compose up, a plain path to a binary).
+  const cmd = "Start-Sleep -Seconds 30";
+  const first = await runCommand.execute({ command: cmd, run_in_background: true }, c);
+  assert.match(first.output, /background as shell #\d+/i);
+
+  const second = await runCommand.execute({ command: cmd, run_in_background: true }, c);
+  assert.equal(second.isError, true, "a duplicate must be refused");
+  assert.match(second.output, /already running in the background as shell #\d+/);
+  assert.equal(mgr.running().length, 1, "no second copy should have been started");
+  mgr.dispose();
+});

@@ -35,13 +35,21 @@ export const shellOutput: Tool = {
     if (!res) return fail(`no background shell #${id}.`);
     const head = statusLine(res.info);
     const body = res.chunk.trim();
-    // If it's still running, tell the model to stop polling — the completion is pushed
-    // to it automatically, so a poll loop is pure waste (and reads as spam to the user).
-    const stillRunning = res.info.status === "running";
-    const nudge = stillRunning
-      ? "\n[Still running. You'll be notified automatically when it finishes — do NOT poll again. " +
-        "End your turn and let the user know you'll report when it's ready.]"
-      : "";
+    // If it's still running, stop the model polling: the event is pushed to it, so a
+    // poll loop is pure waste and reads as spam. But the nudge has to promise the
+    // RIGHT event. A server is never told about its own stop, so telling the model it
+    // would hear "when it finishes" is a promise the tool does not keep — the same
+    // false claim that once had it announcing a report that never arrived.
+    const nudge =
+      res.info.status !== "running"
+        ? ""
+        : res.info.notify === "on_failure"
+          ? "\n[Still starting. You'll be told automatically once it has come up, and you will NOT be " +
+            "told when it later stops — do NOT poll again. End your turn.]"
+          : res.info.notify === "never"
+            ? "\n[Still running. Nothing about this will be reported to you — do NOT poll again. End your turn.]"
+            : "\n[Still running. You'll be notified automatically when it finishes — do NOT poll again. " +
+              "End your turn and let the user know you'll report when it's done.]";
     return {
       output: (body ? `${head}\n${body}` : `${head}\n(no new output)`) + nudge,
       summary: `shell #${id} (${res.info.status})`,
@@ -89,14 +97,38 @@ export const listShells: Tool = {
   },
 };
 
+/**
+ * One line describing a shell, including the facts that decide whether anything needs
+ * doing about it.
+ *
+ * `stoppedBy` and `ready` are recorded precisely so the model can answer "is my app
+ * up" and "why did it stop" without guessing, so they have to be rendered here — this
+ * is the only place it can go looking. Without them every ending reads as `exited 1`,
+ * which is the same thing a crash and a user closing a window both produce.
+ */
 function statusLine(info: ShellInfo, ctx?: ToolContext): string {
   const where = ctx ? ` in ${relativize(ctx, info.cwd)}` : "";
   if (info.status === "running") {
     const secs = Math.round((Date.now() - info.startedAt) / 1000);
-    return `#${info.id} running (${secs}s)${where}: ${info.command}`;
+    const state = info.notify === "on_failure" ? (info.ready ? "up" : "starting") : "running";
+    return `#${info.id} ${state} (${secs}s)${where}: ${info.command}`;
   }
-  const verb = info.status === "killed" ? "killed" : `exited ${info.exitCode}`;
-  return `#${info.id} ${verb}${where}: ${info.command}`;
+  const verb =
+    info.stoppedBy === "user"
+      ? "stopped by the user"
+      : info.stoppedBy === "agent"
+        ? "stopped by you"
+        : info.status === "killed"
+          ? "killed"
+          : // A signalled process reports no exit code, so reading the number gives
+            // "exited null" — which is how a stopped app used to describe itself.
+            info.signal
+            ? `stopped (${info.signal})`
+            : `exited ${info.exitCode}`;
+  // Whether it ever came up is what separates "the user closed their app" from "it
+  // never started", which the exit code alone cannot tell you.
+  const cameUp = info.notify === "on_failure" && !info.stoppedBy ? (info.ready ? ", after it had come up" : ", never came up") : "";
+  return `#${info.id} ${verb}${cameUp}${where}: ${info.command}`;
 }
 
 function toId(value: unknown): number | null {

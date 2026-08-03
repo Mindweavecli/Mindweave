@@ -220,8 +220,17 @@ export function App() {
   function handleBgChange() {
     setBgTick((t) => t + 1);
     const mgr = session.current?.toolContext.backgroundShells;
-    for (const sh of mgr?.takeUiNotifications() ?? []) {
-      const verb = sh.status === "killed" ? "killed" : `finished — exit ${sh.exitCode}`;
+    for (const { info: sh, kind } of mgr?.takeUiEvents() ?? []) {
+      if (kind === "ready") {
+        addTool(`shell #${sh.id} (${clipCmd(sh.command)}) is up`);
+        continue;
+      }
+      const verb =
+        sh.status === "killed"
+          ? sh.stoppedBy === "user"
+            ? "stopped by you"
+            : "killed"
+          : `finished — exit ${sh.exitCode}`;
       addTool(`shell #${sh.id} (${clipCmd(sh.command)}) ${verb}`, { error: sh.status !== "killed" && sh.exitCode !== 0 });
     }
   }
@@ -360,7 +369,7 @@ export function App() {
         // Esc means STOP — including anything running in the background (a starting app,
         // a dev server). Aborting the turn alone left those alive, so the app still opened.
         const mgr = session.current?.toolContext.backgroundShells;
-        for (const sh of mgr?.running() ?? []) mgr?.kill(sh.id);
+        for (const sh of mgr?.running() ?? []) mgr?.kill(sh.id, "user");
         flush.current = true; // drain the rest of the queue immediately
         note("stopped.");
       }
@@ -764,7 +773,7 @@ export function App() {
     else if (o.kind === "think") void applyThink(index);
     else if (o.kind === "shells") {
       const sh = o.items[index];
-      if (sh && sh.status === "running" && session.current?.toolContext.backgroundShells?.kill(sh.id)) {
+      if (sh && sh.status === "running" && session.current?.toolContext.backgroundShells?.kill(sh.id, "user")) {
         note(`stopped shell #${sh.id} (${clipCmd(sh.command)})`);
       }
     } else if (o.kind === "mcp") {

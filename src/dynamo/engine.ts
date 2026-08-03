@@ -455,15 +455,43 @@ function buildRequest(
 async function backgroundEventNotes(session: Session): Promise<string[]> {
   const mgr = session.toolContext.backgroundShells;
   if (!mgr) return [];
-  const done = await mgr.drainCompleted();
-  return done.map(({ info, tail }) => {
-    const status = info.status === "killed" ? "was killed" : `finished with exit code ${info.exitCode}`;
-    // Only interactive-server CRASHES reach here (a clean stop is marked reported and
-    // never drains). Tell the model to report, not restart — the user closing/crashing
-    // their app is not a cue to relaunch it.
-    const guidance = isInteractiveServerCommand(info.command)
-      ? "This is a dev server / app that stopped on its own. Tell the user what happened, but do NOT restart it yourself unless they ask — they control when their app runs."
-      : "If it failed, tell the user briefly what went wrong and propose a fix — don't change files unless they agree.";
+  const events = await mgr.drainEvents();
+  return events.map(({ info, kind, tail, wake }) => {
+    // It came up. This is the only positive event a server ever produces, and it is
+    // what lets the model actually deliver the "I'll tell you when it's running" it
+    // was told to say. Nothing has gone wrong, so there is nothing to fix.
+    if (kind === "ready") {
+      return (
+        `[Background shell #${info.id} (\`${info.command}\`) is up and running.]\n` +
+        `Recent output:\n${tail || "(no output)"}\n\n` +
+        `Tell the user in one short line that it's running. Nothing is wrong — do not investigate, ` +
+        `do not restart it, and do not change any files because of this.`
+      );
+    }
+    const status =
+      info.status === "killed"
+        ? info.stoppedBy === "user"
+          ? "was stopped by the user"
+          : "was killed"
+        : `finished with exit code ${info.exitCode}`;
+    // An ending that is NOT worth interrupting for still arrives, so the model knows the
+    // thing is down and can answer about it. It is explicitly not a task: this is the
+    // path a user closing their own app takes, and treating it as news is what made the
+    // agent reopen it.
+    if (!wake) {
+      return (
+        `[Background shell #${info.id} (\`${info.command}\`) ${status}. It had already started up, so ` +
+        `this is the user stopping their own app, not a failure.]\n` +
+        `This is background information only. Do NOT mention it unless it is relevant, do NOT restart ` +
+        `it, and do NOT change any files because of it. If the user later asks about this app, you now ` +
+        `know it is stopped.`
+      );
+    }
+    // For a server, only a failure to come up reaches here: a normal stop does not wake.
+    const guidance =
+      info.notify === "on_failure"
+        ? "This is a server or app that never came up, so the user never saw it running. Tell them what happened and offer to fix it — but do not restart it repeatedly on your own."
+        : "If it failed, tell the user briefly what went wrong and propose a fix — don't change files unless they agree.";
     return (
       `[Background shell #${info.id} (\`${info.command}\`) ${status}.]\n` +
       `Recent output:\n${tail || "(no output)"}\n\n` +
