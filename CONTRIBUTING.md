@@ -75,13 +75,17 @@ That is the short version. The full statement of how this project is run, why th
 
 ### What we are working on next
 
-MCP shipped in v1.3, and v1.4 added resources, server prompts and result spilling. v1.5 went to process lifecycle instead: servers and background jobs that outlived the session, and an interrupt that did not stop queued work. What remains, and what v1.6 is about:
+**Core hardening.** MCP shipped in v1.3 and v1.4, and v1.5 turned to process lifecycle: servers and background jobs that outlived the session, and an interrupt that did not stop queued work. That is the current focus and it continues, subsystem by subsystem, through the parts the agent actually runs on every task.
 
-* **OAuth for remote servers.** Servers needing authorization currently report `needs-auth` and stop there. This is the largest remaining piece and the hardest to verify, since it needs a real identity provider to test against. If you run one, that help is worth more than the code.
+The method is deliberately unglamorous. Take a subsystem that is already shipped and already has passing tests, read it fresh on the assumption it is wrong, and go looking for the failure shapes this project has been bitten by before, which are written down in [BOUNDARY.md](BOUNDARY.md). The last two passes each found real defects in code with hundreds of green tests. Reproductions from your own machine are worth more here than anything else, because most of what turns up only appears when the thing is genuinely run.
+
+Known MCP gaps, parked until the core is where it needs to be:
+
+* **OAuth for remote servers.** Servers needing authorization report `needs-auth` and stop there. The largest remaining MCP piece and the hardest to verify, since it needs a real identity provider to test against.
 * **Multi-round tool requests and elicitation.** A server that needs extra input mid-call cannot ask for it yet.
 * **Resources in the prompt box.** Resources are reachable by the agent but there is no way to attach one yourself with `@`.
 
-If that is where you want to help, say so in Discussions before writing code so the work does not collide.
+If any of that is where you want to help, say so in Discussions before writing code so the work does not collide.
 
 ### Especially useful right now
 

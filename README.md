@@ -76,7 +76,7 @@ Every item here started as something watched happening on a real project. The th
 
 **Compaction is anchored to each model, from numbers the driver measured.** The point at which a session gets summarized used to come from fixed constants in the core, including a guess at how much room a summary needs. That figure now comes from the driver that knows it. The bar for clearing old tool output also gained an absolute ceiling, because a flat share of the window stops meaning "small" once windows get large: on a 500K model it would have carried 150K of stale output on every single turn, which on your own API key is your money.
 
-**Next up:** OAuth, for remote servers that need a login.
+**Next up:** more of the same. The core is being gone through subsystem by subsystem, looking for the things that only show up when you actually run it.
 
 
 ## Features
@@ -173,9 +173,10 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 - [x] **v1.3: MCP / external tool servers, with rug-pull protection and a deferred tool pool**
 - [x] **v1.4: MCP hardening with resources and server prompts, and rebuilt editing tools**
 - [x] **v1.5: processes cleaned up properly, an Esc that actually cancels, per-model compaction**
-- [ ] **v1.6: OAuth for remote servers**, the next release
+- [ ] **Core hardening**, the current focus: every subsystem the agent actually runs, gone through one at a time
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …), community-built
 - [ ] Verified macOS / Linux support
+- [ ] OAuth for remote MCP servers, once the core is where it needs to be
 
 ## Found a bug?
 
