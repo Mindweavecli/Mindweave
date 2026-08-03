@@ -6,7 +6,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { BackgroundShells, isInteractiveServerCommand, findRunningDuplicate } from "./backgroundShells.js";
+import {
+  BackgroundShells,
+  isInteractiveServerCommand,
+  findRunningDuplicate,
+  shouldNotifyModel,
+} from "./backgroundShells.js";
 import type { ShellInfo } from "./backgroundShells.js";
 import { runCommand } from "./runCommand.js";
 import type { ToolContext } from "./types.js";
@@ -127,6 +132,62 @@ test("a dev server that CRASHES (non-zero) still wakes the model", async () => {
   mgr.dispose();
 });
 
+// ── How a shell ENDED decides whether the model hears about it ───────────────
+//
+// These pin the measured behaviour of a real close. On Windows `taskkill /T` (what
+// /shells, killTree and closing a console app all amount to) reports code 1, and
+// SIGTERM/SIGINT report code null. The old `code === 0` rule missed all three, so
+// closing your app told the model it had crashed and the model reopened it.
+
+const SERVER = { interactive: true, killed: false } as const;
+const LONG = 60_000; // it had been up for a minute: a session, not a failed start
+
+test("closing an app does NOT wake the model, whichever way it actually ends", () => {
+  // taskkill /T — measured code 1, no signal. THE reported bug.
+  assert.equal(shouldNotifyModel({ ...SERVER, code: 1, signal: null, ranForMs: LONG }), false);
+  // proc.kill() / Ctrl+C — measured code null with a signal.
+  assert.equal(shouldNotifyModel({ ...SERVER, code: null, signal: "SIGTERM", ranForMs: LONG }), false);
+  assert.equal(shouldNotifyModel({ ...SERVER, code: null, signal: "SIGINT", ranForMs: LONG }), false);
+  // The app closing itself cleanly — the only case the old rule got right.
+  assert.equal(shouldNotifyModel({ ...SERVER, code: 0, signal: null, ranForMs: LONG }), false);
+});
+
+test("a signal ends a server quietly even inside the startup window", () => {
+  // Stopping something two seconds after launching it is still stopping it.
+  assert.equal(shouldNotifyModel({ ...SERVER, code: null, signal: "SIGTERM", ranForMs: 2_000 }), false);
+});
+
+test("a server that never came up DOES wake the model", () => {
+  // Port already in use, bad config: dies immediately with a failure code. Same exit
+  // status as a user closing it, so only the duration separates them.
+  assert.equal(shouldNotifyModel({ ...SERVER, code: 1, signal: null, ranForMs: 800 }), true);
+});
+
+test("we killed it ourselves, so there is nothing to report", () => {
+  assert.equal(shouldNotifyModel({ interactive: true, killed: true, code: null, signal: null, ranForMs: LONG }), false);
+});
+
+test("a finite task always reports, however it ended", () => {
+  const task = { interactive: false, killed: false } as const;
+  assert.equal(shouldNotifyModel({ ...task, code: 0, signal: null, ranForMs: LONG }), true);
+  assert.equal(shouldNotifyModel({ ...task, code: 1, signal: null, ranForMs: LONG }), true);
+  assert.equal(shouldNotifyModel({ ...task, code: null, signal: "SIGTERM", ranForMs: 50 }), true);
+});
+
+test("a dev server stopped from OUTSIDE does not wake the model", async () => {
+  // The real scenario end to end: the process is ended by something that is not our
+  // kill(), so `killed` is false and only the signal/exit tells us what happened.
+  const mgr = new BackgroundShells();
+  const child = spawn(NODE, ["-e", "setTimeout(()=>{}, 100000)"], { detached: DETACH });
+  mgr.adopt(child, { command: "npm run tauri dev", cwd: process.cwd() });
+  child.kill(); // the user closes the window
+  await waitUntil(() => mgr.list()[0]!.status !== "running");
+  assert.equal(mgr.pendingCount(), 0, "closing the app must not queue a wake-up");
+  assert.equal((await mgr.drainCompleted()).length, 0);
+  assert.equal(mgr.takeUiNotifications().length, 1, "the user should still SEE that it stopped");
+  mgr.dispose();
+});
+
 test("a finite task (build) exiting cleanly still wakes the model to report", async () => {
   const mgr = new BackgroundShells();
   const child = spawn(NODE, ["-e", "console.log('built ok')"], { detached: DETACH });
@@ -161,6 +222,72 @@ test("run_command moves a slow command to the background instead of killing it",
 function shell(id: number, command: string): ShellInfo {
   return { id, command, cwd: "/p", status: "running", exitCode: null, startedAt: 0, finishedAt: null };
 }
+
+test("a shell finalizes even when a surviving grandchild holds the pipe open", { timeout: 30_000 }, async (t) => {
+  if (!IS_WIN) {
+    t.skip("the orphaned-grandchild pipe hold is the Windows shell-spawn shape");
+    return;
+  }
+  // `close` fires only once every stdio stream closes. Kill the shell wrapper and the
+  // grandchild keeps the pipe open, so `close` never arrives and the entry used to sit
+  // at "running" for the rest of the session. The `exit` backstop has to finalize it.
+  const mgr = new BackgroundShells();
+  const wrapper = spawn(`node -e "setInterval(()=>{},1000)"`, {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    shell: true,
+  });
+  mgr.adopt(wrapper, { command: "npm run dev", cwd: process.cwd() });
+  await sleep(800);
+
+  const { execSync } = await import("node:child_process");
+  const kids = execSync(
+    `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${wrapper.pid} } | Select-Object -ExpandProperty ProcessId"`,
+    { encoding: "utf8" },
+  )
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(Number);
+
+  wrapper.kill(); // only the wrapper — the grandchild survives, still holding stdout
+  await waitUntil(() => mgr.list()[0]!.status !== "running", 15_000);
+  assert.notEqual(mgr.list()[0]!.status, "running", "the entry must not be stranded as running");
+
+  mgr.dispose();
+  for (const pid of kids) {
+    try {
+      execSync(`taskkill /F /T /PID ${pid}`, { stdio: "ignore" });
+    } catch {
+      /* already gone */
+    }
+  }
+});
+
+test("an interrupted turn does not leave a background process running", async () => {
+  // run_command's background branch returns BEFORE the abort listener is wired, so it
+  // has to check the signal itself. Without that, Esc still launches a dev server that
+  // outlives the turn — exactly what backgrounding is designed to do.
+  const mgr = new BackgroundShells();
+  const controller = new AbortController();
+  controller.abort();
+  const ctx = {
+    cwd: process.cwd(),
+    roots: [process.cwd()],
+    reads: new Map(),
+    backgroundShells: mgr,
+    abortSignal: controller.signal,
+  } as unknown as Parameters<typeof runCommand.execute>[1];
+
+  const result = await runCommand.execute(
+    { command: nodeCmd("setTimeout(()=>{}, 100000)"), run_in_background: true },
+    ctx,
+  );
+
+  assert.equal(result.isError, true);
+  assert.match(result.output, /interrupt/i);
+  assert.equal(mgr.list().length, 0, "nothing should have been adopted after an abort");
+  mgr.dispose();
+});
 
 test("findRunningDuplicate: matches the same server command (ignoring whitespace/case)", () => {
   const running = [shell(2, "npm run tauri dev")];

@@ -213,7 +213,22 @@ async function runShell(
   const mgr = ctx.backgroundShells;
 
   // Explicit background: hand off immediately, don't wait for it.
+  //
+  // The abort listener below is only wired for the FOREGROUND path, so this branch
+  // has to check the signal itself. Without it an interrupted turn still adopts the
+  // process, and because backgrounding deliberately outlives the turn, Esc would
+  // leave a dev server running that the user believed they had cancelled.
   if (background && mgr) {
+    if (ctx.abortSignal?.aborted) {
+      killTree(child.pid);
+      void fs.rm(cwdFile, { force: true }).catch(() => {});
+      if (tempFile) void fs.rm(tempFile, { force: true }).catch(() => {});
+      return {
+        output: "Command interrupted before it started.",
+        isError: true,
+        summary: `interrupted \`${clip(command)}\``,
+      };
+    }
     const info = mgr.adopt(child, { command, cwd: ctx.cwd, cwdFile });
     return backgroundedResult(info.id, command, `Started in the background as shell #${info.id}`);
   }

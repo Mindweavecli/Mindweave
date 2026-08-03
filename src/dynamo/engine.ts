@@ -703,6 +703,21 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     const serialCalls = toolCalls.filter((call) => !concurrencySafe(call));
 
     const runCall = async (call: (typeof toolCalls)[number]) => {
+      // Esc: once the turn is aborted, no further tool may START. The step loop only
+      // re-checks BETWEEN steps, so without this gate the rest of a batch still runs
+      // after the interrupt — and a `run_in_background` command in that batch would
+      // outlive the turn entirely, leaving a process the user thought they cancelled.
+      // Placed here, at the single execution choke point, so it covers both the
+      // parallel and serial lanes and every tool uniformly.
+      if (options.signal?.aborted) {
+        return {
+          call,
+          output: "Not run: the turn was interrupted before this tool started.",
+          summary: "interrupted",
+          isError: true,
+          detail: undefined as string | undefined,
+        };
+      }
       const tool = lookup(call.name);
       if (!tool) {
         return { call, output: `Error: unknown tool '${call.name}'.`, summary: `unknown tool '${call.name}'`, isError: true, detail: undefined as string | undefined };

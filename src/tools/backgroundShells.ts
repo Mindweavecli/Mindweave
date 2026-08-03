@@ -22,11 +22,37 @@
  */
 import { promises as fs } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { killTree } from "./killTree.js";
+import { killTree, killTreeSync } from "./killTree.js";
 
 const MAX_BUFFER_CHARS = 5_000_000; // cap one shell's retained output (runaway server)
 const MAX_READ_CHARS = 30_000; // cap a single shell_output read
 const TAIL_CHARS = 2_000; // how much trailing output rides on a completion note
+
+/**
+ * How long a server has to stay up before we treat its death as "someone stopped it"
+ * rather than "it failed to start".
+ *
+ * This is the one honest way to tell the two apart, because the exit status cannot:
+ * measured on Windows, a user closing an app reports `code 1`, and so does a server
+ * that crashed because its port was taken. Duration separates them cleanly — a port
+ * conflict dies in under a second, a session you close has been up for minutes.
+ *
+ * Borrowed from process supervisors, which hit this decades ago: supervisord counts a
+ * program as failed-to-start if it exits before `startsecs` (default 1s) regardless of
+ * its exit code. 10s is deliberately generous, since a dev server can take several
+ * seconds to bind a port and fail.
+ */
+const STARTUP_GRACE_MS = 10_000;
+
+/**
+ * How long to wait after `exit` for `close` before finalizing anyway.
+ *
+ * `close` fires only once every stdio stream is closed, and a surviving grandchild can
+ * hold the pipe open forever, which strands the entry as permanently "running".
+ * `exit` fires when the process itself goes, so it is the backstop; the delay lets
+ * `close` win normally so buffered output is not lost.
+ */
+const EXIT_GRACE_MS = 2_000;
 
 export type ShellStatus = "running" | "exited" | "killed";
 
@@ -50,6 +76,40 @@ export function isInteractiveServerCommand(command: string): boolean {
   return /\b(tauri|vite|next|nuxt|remix|astro|nodemon|electron|expo|ng|http-server|live-server|serve|webpack-dev-server|watchexec)\b/.test(
     c,
   );
+}
+
+/**
+ * Should a finished shell WAKE THE MODEL? (pure/tested)
+ *
+ * The old rule was `interactive && (killed || code === 0)`, which assumed a closed app
+ * exits 0. Measured, it does not: `taskkill /T` (what `/shells`, `killTree`, and
+ * closing a console app all amount to) reports **code 1**, and SIGTERM/SIGINT report
+ * `code null`. Three of the four ways an app can end therefore fell through, the model
+ * was told its dev server had "failed", and it restarted the thing the user had just
+ * closed — every time, forever.
+ *
+ * The rule now asks what actually happened rather than reading a number that means
+ * different things on different platforms:
+ *
+ *   - a finite task (build, test, lint) always reports: its result is the whole point
+ *   - we killed it ourselves → the agent or the user did that on purpose, say nothing
+ *   - a signal ended it → SIGTERM/SIGINT is someone stopping it, not a crash
+ *   - a clean exit 0 → it stopped on its own terms
+ *   - anything else → report ONLY if it died inside the startup grace, which is a
+ *     server that never came up (port taken, bad config) and is worth surfacing
+ */
+export function shouldNotifyModel(end: {
+  interactive: boolean;
+  killed: boolean;
+  code: number | null;
+  signal: string | null;
+  ranForMs: number;
+}): boolean {
+  if (!end.interactive) return true;
+  if (end.killed) return false;
+  if (end.signal) return false;
+  if (end.code === 0) return false;
+  return end.ranForMs < STARTUP_GRACE_MS;
 }
 
 /**
@@ -143,8 +203,18 @@ export class BackgroundShells {
     const collect = (chunk: Buffer) => this.append(entry, chunk.toString("utf8"));
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
-    child.on("close", (code) => this.onClose(entry, code, false));
-    child.on("error", () => this.onClose(entry, null, false));
+    // `signal` is captured, not dropped: a process ended by SIGTERM/SIGINT reports
+    // `code === null`, and without the signal there is no way to tell that from a
+    // crash.
+    child.on("close", (code, signal) => this.onClose(entry, code, signal, false));
+    child.on("error", () => this.onClose(entry, null, null, false));
+    // Backstop for a `close` that never arrives because a surviving grandchild still
+    // holds the stdio pipe. Without this the entry stays "running" for the rest of the
+    // session: the UI shows a dead shell, and `runningCount()` is permanently wrong.
+    child.on("exit", (code, signal) => {
+      const timer = setTimeout(() => this.onClose(entry, code, signal, false), EXIT_GRACE_MS);
+      timer.unref?.();
+    });
 
     this.emit();
     return view(entry);
@@ -160,18 +230,26 @@ export class BackgroundShells {
     }
   }
 
-  private onClose(entry: Entry, code: number | null, killed: boolean): void {
+  private onClose(entry: Entry, code: number | null, signal: string | null, killed: boolean): void {
     if (entry.status !== "running") return;
     entry.status = killed ? "killed" : "exited";
     entry.exitCode = code;
     entry.finishedAt = Date.now();
     entry.child = null;
-    // A dev server / app stopping cleanly (exit 0) or being killed means the USER
-    // closed it — not a result to report. Mark it already-reported so it never wakes
-    // the model (the "reopen the app they just closed" bug). A non-zero exit is a real
-    // crash worth surfacing, so leave it pending. The UI still shows the stop either
-    // way (uiNotified is untouched).
-    if (entry.interactive && (killed || code === 0)) entry.reported = true;
+    // Decide whether this end is worth waking the model for. Marking it already
+    // reported is what stops the "reopen the app they just closed" loop. The UI still
+    // shows the stop either way (uiNotified is untouched), so the user always sees it.
+    if (
+      !shouldNotifyModel({
+        interactive: entry.interactive,
+        killed,
+        code,
+        signal,
+        ranForMs: entry.finishedAt - entry.startedAt,
+      })
+    ) {
+      entry.reported = true;
+    }
     if (entry.cwdFile) void fs.rm(entry.cwdFile, { force: true }).catch(() => {});
     this.emit();
   }
@@ -193,7 +271,7 @@ export class BackgroundShells {
     const entry = this.shells.get(id);
     if (!entry || entry.status !== "running" || !entry.child) return false;
     killTree(entry.child.pid);
-    this.onClose(entry, null, true);
+    this.onClose(entry, null, null, true);
     return true;
   }
 
@@ -236,10 +314,19 @@ export class BackgroundShells {
     return out;
   }
 
-  /** Kill every running shell and drop the registry (session swap / exit). */
-  dispose(): void {
+  /**
+   * Kill every running shell and drop the registry (session swap / exit).
+   *
+   * `sync` is required when disposing from a process-exit handler: the default
+   * kill spawns `taskkill` asynchronously, and Node runs no async work during
+   * exit, so the shells would outlive us. Measured, not assumed.
+   */
+  dispose(sync = false): void {
     for (const entry of this.shells.values()) {
-      if (entry.status === "running" && entry.child) killTree(entry.child.pid);
+      if (entry.status === "running" && entry.child) {
+        if (sync) killTreeSync(entry.child.pid);
+        else killTree(entry.child.pid);
+      }
       if (entry.cwdFile) void fs.rm(entry.cwdFile, { force: true }).catch(() => {});
     }
     this.shells.clear();
@@ -268,6 +355,7 @@ function registerCleanup(): void {
   if (cleanupRegistered) return;
   cleanupRegistered = true;
   process.once("exit", () => {
-    for (const mgr of active) mgr.dispose();
+    // Synchronous kill: an async one never reaches the OS from here.
+    for (const mgr of active) mgr.dispose(true);
   });
 }
