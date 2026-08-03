@@ -90,6 +90,8 @@ interface DriverManifest {
   price(model): ModelPrice;         // cache-aware cost
   contextWindow(model): number;     // sharp window → compaction
   normalize(cfg: ModelConfig): ModelConfig;  // coerce a saved/unknown selection
+
+  bufferedOutputTokens?(model): number;  // optional: your ceiling on a buffered call
 }
 
 // index.ts — the wire half, loaded only when your provider is selected
@@ -107,6 +109,20 @@ exists, or a reasoning level this model doesn't offer, or a combination the API
 rejects) and you return something you can actually serve. It is also where you
 enforce per-model rules — the Anthropic driver uses it to make sure no-thinking is
 never paired with an effort level Opus 5 refuses, so that never reaches the wire.
+
+`bufferedOutputTokens` is the ceiling YOUR driver puts on a single non-streaming
+call — the shape core uses for its small internal work, like a compaction summary.
+Core reserves exactly that much room below the window so a summary always fits, so
+a provider capping buffered replies at 8K gets a far smaller reserve than one
+allowing 64K. It is not the model's advertised output maximum: both current
+Anthropic models accept 128K, and that driver reports 16K because 16K is what it
+sends. Omit it if you send no ceiling at all and let the provider's default apply
+(the DeepSeek driver does) — core then falls back to a conservative reserve rather
+than reserving nothing.
+
+Note the shape of that field, because it is the shape of every number in this
+contract: you report a fact you can measure, and core decides what to do with it.
+Do not add a hook that returns a threshold, a placement, or a bar. See BOUNDARY.md.
 
 `sanitizeText` is only needed if your provider leaks markup into the text channel —
 the live UI renders raw deltas, so that is the one place a finished turn's cleanup

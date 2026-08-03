@@ -34,7 +34,7 @@ import type {
   TurnOptions,
   Usage,
 } from "../types.js";
-import { DEFAULT_MODEL } from "./manifest.js";
+import { BUFFERED_OUTPUT_TOKENS, DEFAULT_MODEL } from "./manifest.js";
 
 const MODEL = process.env.MINDWEAVE_MODEL ?? DEFAULT_MODEL;
 
@@ -42,8 +42,10 @@ const MODEL = process.env.MINDWEAVE_MODEL ?? DEFAULT_MODEL;
  *  at the higher effort levels; both models accept up to 128K when streaming. */
 const MAX_TOKENS_STREAM = 64_000;
 /** Buffered calls are the small internal ones (summaries, page distillation), and
- *  a non-streaming request that runs long risks an HTTP timeout. */
-const MAX_TOKENS_BUFFERED = 16_000;
+ *  a non-streaming request that runs long risks an HTTP timeout. The value lives
+ *  in the manifest because core reserves room for it when setting the compaction
+ *  bars — one constant, so the request and the reservation can't drift apart. */
+const MAX_TOKENS_BUFFERED = BUFFERED_OUTPUT_TOKENS;
 
 let client: Anthropic | null = null;
 

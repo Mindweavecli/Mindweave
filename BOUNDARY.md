@@ -65,12 +65,38 @@ Faster signals:
 | Would become dead code if that provider were removed | driver |
 | Is about files, sessions, tools, safety, or the user's project | core |
 | Every provider needs it and none needs it differently | core |
+| Is a number you measured about your model | driver, as a manifest fact |
+| Is a threshold, a bar, a placement, or an ordering | core, always |
 
 **The trap.** "This model keeps doing X, add an instruction telling it not to" feels
 like a core prompt change. It is not. It is one model's crutch, and core hands it to
 every other model that never needed it. Prefer fixing it in the driver, or accepting
 the behavior, or concluding the model is wrong for the job. Instructions to core
 that exist because of one provider are the main way this architecture rots.
+
+**Facts belong to the driver. Decisions belong to core.** A manifest reports things
+about a model that someone measured: its usable window, its prices, the effort rungs
+it accepts, the ceiling the driver puts on a buffered call. Core reads those and
+decides what to do with them: where the compaction bars land, how much headroom to leave,
+what order things go in, which tools exist. Both halves are needed and the split is
+what keeps them honest.
+
+A hook that returns a threshold instead of a measurement fails this test even
+though it looks like the same kind of field. `contextWindow()` is a fact. A
+hypothetical `compactAt()` is not: "when do I summarize" is a policy that should be
+identical everywhere, and once eight providers each answer it separately there is no
+way to know any of the answers are right. Nobody will measure them, and a guess
+sitting in a manifest reads like evidence. Same for tool lists (behaviour, not a
+property of the model) and prompt-block placement (no measurement exists).
+
+Two rules follow, and PRs are checked against both:
+
+- **A driver never contains a decision about what the agent does.** If your new
+  manifest field's value would be argued about rather than measured, it is core's.
+- **Every manifest value comes from measurement, and the reasoning goes in the
+  file.** DeepSeek's 256K carries its published NIAH-2/MRCR curve; Flash's 192K
+  says outright that it is a judgment call under absent data. Either is fine.
+  A number with no stated basis is not.
 
 ### 3. What breaks for the other providers?
 

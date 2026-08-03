@@ -73,6 +73,24 @@ export function contextWindow(_model: ModelId): number {
   return 200_000;
 }
 
+/**
+ * The ceiling this driver puts on a single buffered (non-streaming) call.
+ *
+ * Both models accept 128K output, but a non-streaming request that runs that long
+ * risks an HTTP timeout, so the buffered path — core's small internal calls, like
+ * a compaction summary — is deliberately capped far lower. `client.ts` sends this
+ * value and `dynamo/contextWindow.ts` reserves it; keeping one exported constant
+ * means the request and the reservation cannot drift apart.
+ *
+ * The streaming ceiling is a separate, much larger number and lives in `client.ts`,
+ * because nothing in core needs to reserve room for it.
+ */
+export const BUFFERED_OUTPUT_TOKENS = 16_000;
+
+export function bufferedOutputTokens(_model: ModelId): number {
+  return BUFFERED_OUTPUT_TOKENS;
+}
+
 /** Effort rungs both models accept, in order. */
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -102,5 +120,6 @@ export const anthropicManifest: DriverManifest = {
   thinkLevels,
   price,
   contextWindow,
+  bufferedOutputTokens,
   normalize,
 };

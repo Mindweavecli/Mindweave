@@ -237,6 +237,25 @@ export interface DriverManifest {
   contextWindow(model: ModelId): number;
 
   /**
+   * The ceiling this driver puts on a single BUFFERED (non-streaming) call.
+   *
+   * Buffered calls are core's small internal ones — a compaction summary, a page
+   * distillation — so this is the most tokens one of those can come back with.
+   * Core reserves exactly this much room below the window, which is why it is a
+   * fact the driver has to report rather than a number core can guess: a provider
+   * that caps its buffered replies at 8K needs a far smaller reserve than one that
+   * allows 64K, and reserving the larger of the two on both wastes context.
+   *
+   * This is NOT the model's advertised output maximum (both current Anthropic
+   * models accept 128K). It is what THIS driver actually sends, so it belongs to
+   * the driver rather than the model card.
+   *
+   * Optional: a driver that sends no ceiling at all, leaving the provider's own
+   * default to apply, omits it and core falls back to a conservative reserve.
+   */
+  bufferedOutputTokens?(model: ModelId): number;
+
+  /**
    * Coerce a stored/unknown model id into one this provider actually serves, and
    * keep the reasoning intent valid for it (a level the target model lacks is
    * clamped down, an illegal combination is corrected). Called when loading a
