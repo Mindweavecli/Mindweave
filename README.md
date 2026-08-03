@@ -58,23 +58,19 @@ If the numbers say the current architecture is worse, it changes. That has alrea
 
 Open a Discussion before writing code for anything core-shaped. We will talk it through, and where it makes sense we will test it properly and let the result decide. Being told no early is a better outcome than spending an afternoon on something that was never going to be merged, and this is written down precisely so that conversation can start honestly.
 
-## v1.5: it leaves your machine the way it found it
+## v1.6: it tells you what your app is doing
 
-Every item here started as something watched happening on a real project. The theme is the agent no longer fighting you over processes it started, or leaving them behind when it's done.
+Start a dev server and the agent now tells you when it is actually up, stays quiet when you close it yourself, and still knows it is stopped if you ask later. All of it came from watching it get this wrong.
 
-### Processes
+**You are told when the app is up, not just when it was launched.** Starting something long-running only ever produced one event: the moment it ended. So for a server, which is not supposed to end, there was nothing to report, and the agent would say it would let you know and then never could. A background process that is still alive after its startup window has come up, and that is now its own event. The agent says it is starting, then tells you when it is running.
 
-**Close your app and it stays closed.** Starting a dev server and then closing it yourself made the agent open it again, and again. It had been told the app "failed", because the check for a deliberate stop only recognised a clean exit code of zero. Measured, that is not what closing something looks like: on Windows a closed app reports exit code 1, and Ctrl+C or a kill report no code at all. Three of the four ways an app can end were reading as a crash. It now asks what actually happened instead of reading a number that means different things on different platforms, and uses how long the thing had been running to tell "you closed it" apart from "it never came up", which are otherwise indistinguishable.
+**Close your app and the agent says nothing.** It also does not reopen it. That was already the intent, but the rule behind it read the exit code, and exit codes cannot tell these cases apart: on Windows a closed app and a port conflict both report 1, and anything stopped by a signal reports nothing at all. The question is now whether the thing ever came up. If you saw it running, you closing it is your business. If it never came up, you could not have known it failed, so you get told, with the error output.
 
-**Esc cancels what hasn't run yet.** Interrupting a turn stopped the tool that was running but not the ones queued behind it, so a command the model had already committed to still went ahead after you pressed Esc. In the worst case that was a background process, which by design outlives the turn, so you were left with something running that you believed you had cancelled.
+**It still knows what happened, even when it stays quiet.** Stops that were not worth interrupting for used to be discarded outright, so the agent could not say your app had stopped, and had no answer if you asked why it was down. Every ending is now recorded; only the decision to interrupt you is conditional. Ask whether your app is running and you get a real answer, including whether you stopped it or it stopped itself.
 
-**Nothing is left running when you quit.** Language servers, MCP servers and background shells were all supposed to be killed on exit. On Windows they were not: the kill was asynchronous, and Node runs no asynchronous work while it is shutting down, so the request never reached the operating system at all. Servers started through a shell were separately losing only their wrapper while the real process kept going. Both are fixed, and language servers now get the protocol's proper shutdown handshake rather than having their pipe cut from under them.
+**You can say what you want to hear about.** A command sent to the background takes a `notify` setting: tell me when it finishes, tell me only if it fails to start, or say nothing at all. Before this, the kind of thing being run was guessed from the command name, which meant `cargo run`, `docker compose up`, `flask run` and a plain path to a binary were all mistaken for short tasks. The guess remains as a default; it is no longer the decision.
 
-**Language servers stop growing all session.** Every symbol lookup opened another fifty files into the server and never closed one, so a long session gradually fed it an entire repository. There is now a ceiling on how much stays open.
-
-### Context
-
-**Compaction is anchored to each model, from numbers the driver measured.** The point at which a session gets summarized used to come from fixed constants in the core, including a guess at how much room a summary needs. That figure now comes from the driver that knows it. The bar for clearing old tool output also gained an absolute ceiling, because a flat share of the window stops meaning "small" once windows get large: on a 500K model it would have carried 150K of stale output on every single turn, which on your own API key is your money.
+**Starting a second copy of something already running is refused.** That check used to apply only to commands whose names looked like dev servers, so most things could quietly be launched twice and collide.
 
 **Next up:** more of the same. The core is being gone through subsystem by subsystem, looking for the things that only show up when you actually run it.
 
@@ -173,6 +169,7 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 - [x] **v1.3: MCP / external tool servers, with rug-pull protection and a deferred tool pool**
 - [x] **v1.4: MCP hardening with resources and server prompts, and rebuilt editing tools**
 - [x] **v1.5: processes cleaned up properly, an Esc that actually cancels, per-model compaction**
+- [x] **v1.6: background apps report when they are up, and stay quiet when you close them**
 - [ ] **Core hardening**, the current focus: every subsystem the agent actually runs, gone through one at a time
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …), community-built
 - [ ] Verified macOS / Linux support

@@ -75,7 +75,7 @@ That is the short version. The full statement of how this project is run, why th
 
 ### What we are working on next
 
-**Core hardening.** MCP shipped in v1.3 and v1.4, and v1.5 turned to process lifecycle: servers and background jobs that outlived the session, and an interrupt that did not stop queued work. That is the current focus and it continues, subsystem by subsystem, through the parts the agent actually runs on every task.
+**Core hardening.** MCP shipped in v1.3 and v1.4. v1.5 turned to process lifecycle: servers and background jobs that outlived the session, and an interrupt that did not stop queued work. v1.6 continued in the same place, on what a background process reports and when. That is the current focus and it goes on, subsystem by subsystem, through the parts the agent actually runs on every task.
 
 The method is deliberately unglamorous. Take a subsystem that is already shipped and already has passing tests, read it fresh on the assumption it is wrong, and go looking for the failure shapes this project has been bitten by before, which are written down in [BOUNDARY.md](BOUNDARY.md). The last two passes each found real defects in code with hundreds of green tests. Reproductions from your own machine are worth more here than anything else, because most of what turns up only appears when the thing is genuinely run.
 
