@@ -58,33 +58,23 @@ If the numbers say the current architecture is worse, it changes. That has alrea
 
 Open a Discussion before writing code for anything core-shaped. We will talk it through, and where it makes sense we will test it properly and let the result decide. Being told no early is a better outcome than spending an afternoon on something that was never going to be merged, and this is written down precisely so that conversation can start honestly.
 
-## v1.4: sharper MCP, and editing that holds up
+## v1.5: it leaves your machine the way it found it
 
-Two halves. MCP got everything running it for real turned up, plus the parts of the protocol v1.3 didn't cover. And the editing tools, the ones every task leans on, were rebuilt around what actually goes wrong.
+Every item here started as something watched happening on a real project. The theme is the agent no longer fighting you over processes it started, or leaving them behind when it's done.
 
-### Editing
+### Processes
 
-**Your indentation no longer has to be perfect.** An edit used to need a byte-exact match, so if the model retyped a block with the wrong leading whitespace, something it cannot see, the edit was refused and a turn went to waste. Matching is now exact first, then line-by-line ignoring each line's surrounding whitespace. It stops there on purpose: looser matching does not remove failures, it converts visible refusals into silent edits landing in the wrong place, which is a class of bug other tools are still carrying.
+**Close your app and it stays closed.** Starting a dev server and then closing it yourself made the agent open it again, and again. It had been told the app "failed", because the check for a deliberate stop only recognised a clean exit code of zero. Measured, that is not what closing something looks like: on Windows a closed app reports exit code 1, and Ctrl+C or a kill report no code at all. Three of the four ways an app can end were reading as a crash. It now asks what actually happened instead of reading a number that means different things on different platforms, and uses how long the thing had been running to tell "you closed it" apart from "it never came up", which are otherwise indistinguishable.
 
-**When a change could go in two places, you get told where.** Before, an ambiguous edit produced "matches 2 places" and nothing else, so the retry was another guess. Now it comes back with each candidate, its line number, and enough surrounding code to tell them apart, widening the window until they actually read differently. Both ways out are always named: extend the match, or change all of them.
+**Esc cancels what hasn't run yet.** Interrupting a turn stopped the tool that was running but not the ones queued behind it, so a command the model had already committed to still went ahead after you pressed Esc. In the worst case that was a background process, which by design outlives the turn, so you were left with something running that you believed you had cancelled.
 
-**Several changes to one file go in one call.** `multi_edit` applies them in order, each seeing the last one's result, and if any fails to match the file is left completely untouched rather than half-edited. One call per file, by design: a change you can review beats one you have to trust.
+**Nothing is left running when you quit.** Language servers, MCP servers and background shells were all supposed to be killed on exit. On Windows they were not: the kill was asynchronous, and Node runs no asynchronous work while it is shutting down, so the request never reached the operating system at all. Servers started through a shell were separately losing only their wrapper while the real process kept going. Both are fixed, and language servers now get the protocol's proper shutdown handshake rather than having their pipe cut from under them.
 
-**Editing a file that moved under you is caught.** If a command, a formatter, or you changed a file after the agent read it, the edit is refused and says so. It used to report this as a typo, sending the model to retype a string that could never match. Worse, if the change was somewhere it wasn't editing, the edit went through against content nobody had looked at.
+**Language servers stop growing all session.** Every symbol lookup opened another fifty files into the server and never closed one, so a long session gradually fed it an entire repository. There is now a ceiling on how much stays open.
 
-**Internal retries stay off your screen.** An agent adjusting its own aim is not an error you can act on, and a screen full of "could not edit because…" trains you to ignore the rows that matter. Real failures, permissions, missing files, failed writes, are as visible as ever.
+### Context
 
-### MCP
-
-**Windows could not start most MCP servers.** `spawn` on Windows doesn't resolve a bare command name through PATHEXT, and the transport only used a shell when the command literally ended in `.cmd`. So `{"command": "npx", ...}`, which is how almost every MCP server on earth is configured, failed with `spawn npx ENOENT`. It now resolves properly, and a server that gets shut down has its whole process tree killed instead of just the shell wrapping it, so nothing is left running after you quit.
-
-**The rug pull check only ran at startup.** Tool descriptions were fingerprinted when a server connected, and never again. A server could therefore connect clean, pass the check, then announce a changed tool list and have new descriptions loaded straight into the model's prompt unexamined. That is the exact attack the check exists to stop. Every catalog change is now verified, and anything that moved is blocked with a notice until you review it in `/mcp`.
-
-**One server could swallow a whole turn.** There was no ceiling on the size of a tool result, so a server answering with a large payload put all of it in the model's context, and an image went in as base64 nobody can read. Oversized and binary results are now saved to a file, and the model gets the first part plus the path, so nothing is lost and the turn survives.
-
-**Resources.** Servers expose data as well as actions: a database schema, a runbook, a log. The agent can now list and read those, including URI templates it fills in itself. They are fetched only when it goes looking, and they never enter the tool list, so a server with a thousand resources costs nothing until it is used.
-
-**Prompts as slash commands.** A server can ship its own commands, and they appear alongside your project's skills. Type `/github:review 4821 focus on the migration` and the server writes the instructions.
+**Compaction is anchored to each model, from numbers the driver measured.** The point at which a session gets summarized used to come from fixed constants in the core, including a guess at how much room a summary needs. That figure now comes from the driver that knows it. The bar for clearing old tool output also gained an absolute ceiling, because a flat share of the window stops meaning "small" once windows get large: on a 500K model it would have carried 150K of stale output on every single turn, which on your own API key is your money.
 
 **Next up:** OAuth, for remote servers that need a login.
 
@@ -182,7 +172,8 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 - [x] **v1.2: reads its own past sessions, failure loops interrupt instead of stopping dead, every early stop explains itself**
 - [x] **v1.3: MCP / external tool servers, with rug-pull protection and a deferred tool pool**
 - [x] **v1.4: MCP hardening with resources and server prompts, and rebuilt editing tools**
-- [ ] **v1.5: OAuth for remote servers**, the next release
+- [x] **v1.5: processes cleaned up properly, an Esc that actually cancels, per-model compaction**
+- [ ] **v1.6: OAuth for remote servers**, the next release
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …), community-built
 - [ ] Verified macOS / Linux support
 

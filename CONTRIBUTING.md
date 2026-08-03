@@ -75,7 +75,7 @@ That is the short version. The full statement of how this project is run, why th
 
 ### What we are working on next
 
-MCP shipped in v1.3, and v1.4 added resources, server prompts and result spilling. What remains, and what v1.5 is about:
+MCP shipped in v1.3, and v1.4 added resources, server prompts and result spilling. v1.5 went to process lifecycle instead: servers and background jobs that outlived the session, and an interrupt that did not stop queued work. What remains, and what v1.6 is about:
 
 * **OAuth for remote servers.** Servers needing authorization currently report `needs-auth` and stop there. This is the largest remaining piece and the hardest to verify, since it needs a real identity provider to test against. If you run one, that help is worth more than the code.
 * **Multi-round tool requests and elicitation.** A server that needs extra input mid-call cannot ask for it yet.
