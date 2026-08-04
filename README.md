@@ -1,4 +1,4 @@
-<h1 align="center">MindWeave</h1>
+<h1 align="center">Mindweave</h1>
 
 <p align="center">
   A fast, model-adaptive, terminal-native AI coding agent. You bring your own key; it does the work.
@@ -12,9 +12,9 @@
 
 ---
 
-## What is MindWeave?
+## What is Mindweave?
 
-MindWeave is a coding agent that lives in your terminal and works directly inside your repository, reading, searching, editing, running commands, and verifying its own work. It runs **entirely on your machine**: your code and your API key never touch a MindWeave server.
+Mindweave is a coding agent that lives in your terminal and works directly inside your repository, reading, searching, editing, running commands, and verifying its own work. It runs **entirely on your machine**: your code and your API key never touch a MindWeave server.
 
 It's built lean on purpose. Instead of burning your context budget on heavy scaffolding, MindWeave keeps prompts thin and leaves the model room to actually reason about your code.
 
@@ -22,7 +22,7 @@ It's built lean on purpose. Instead of burning your context budget on heavy scaf
 
 This section is permanent. It is the clearest statement of how this project is run, and it is here so nobody has to guess before they open an issue or write a line of code.
 
-**MindWeave is open to everyone for suggestions. The core is not open to everything.**
+**Mindweave is open to everyone for suggestions. The core is not open to everything.**
 
 Anyone can propose anything. Issues, discussions, pull requests, all welcome, and a good idea from a first-time contributor carries exactly as much weight as one from a maintainer. What differs is where the idea lands, because this project has two very different bars.
 
@@ -98,7 +98,7 @@ Start a dev server and the agent now tells you when it is actually up, stays qui
 
 ## Install
 
-MindWeave installs from source:
+Mindweave installs from source:
 
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
@@ -119,7 +119,7 @@ On first launch, MindWeave asks for your API key and saves it to `~/.mindweave/.
 
 ### Your key
 
-MindWeave is **bring-your-own-key**. Two providers ship today:
+Mindweave is **bring-your-own-key**. Two providers ship today:
 
 ```
 DEEPSEEK_API_KEY=your-key-here     # deepseek-v4-flash, deepseek-v4-pro
@@ -179,7 +179,7 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 
 ## Found a bug?
 
-**Please open an issue.** MindWeave is developed by running it on real projects and fixing what breaks, so a reproduction from someone else's setup is genuinely the most useful thing you can send. Nearly every item in the release notes above started as a failure someone watched happen.
+**Please open an issue.** Mindweave is developed by running it on real projects and fixing what breaks, so a reproduction from someone else's setup is genuinely the most useful thing you can send. Nearly every item in the release notes above started as a failure someone watched happen.
 
 Useful to include: your OS and terminal, which model you were on, and the steps that led to it. If the agent did something odd rather than crashed, the transcript around it helps more than a description does.
 
