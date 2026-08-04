@@ -74,6 +74,8 @@ Start a dev server and the agent now tells you when it is actually up, stays qui
 
 **Next up:** more of the same. The core is being gone through subsystem by subsystem, looking for the things that only show up when you actually run it.
 
+**UI:** Is being designed and close to being finished.
+
 
 ## Features
 
