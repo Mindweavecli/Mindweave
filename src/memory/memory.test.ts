@@ -42,8 +42,9 @@ function sampleTranscript(): Entry[] {
 test("microcompact clears an OLD tool body, keeps its first line, leaves the rest", () => {
   const { entries, cleared, clearedIds } = microcompact(sampleTranscript(), 1);
   assert.equal(cleared, 1);
-  // The cleared result's toolCallId is reported, so the engine can drop that file
-  // from the read ledger (closing the dedup-vs-cleared trap).
+  // The cleared results are reported by id. Nothing mutates the read ledger off the
+  // back of this any more — presence is re-derived from the transcript each step
+  // (memory/presence.ts) — but the ids stay part of the transform's honest output.
   assert.deepEqual(clearedIds, ["1"]);
   // Old tool result (id 1) cleared: first line kept, body gone.
   const t1 = entries[2];

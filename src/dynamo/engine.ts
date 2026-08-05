@@ -29,6 +29,7 @@ import { renderRules, renderSkillCatalog } from "../governor/index.js";
 import type { Session, Entry, ToolCallRecord } from "../memory/types.js";
 import { forkSession } from "../memory/session.js";
 import { buildWorkingSet } from "../memory/workingSet.js";
+import { fullReadPaths } from "../memory/presence.js";
 import {
   KEEP_LAST_N,
   KEEP_LAST_N_BOUNDARY,
@@ -40,7 +41,7 @@ import {
   microcompact,
   spliceSummary,
 } from "../memory/compaction.js";
-import { autoCompactThreshold, microCompactThreshold } from "./contextWindow.js";
+import { autoCompactThreshold, microCompactThreshold, measuredOverhead } from "./contextWindow.js";
 import { renderSessionMemory, shouldUpdateSessionMemory, updateSessionMemory } from "../memory/sessionMemory.js";
 
 /** Stop retrying autocompact after this many consecutive failures in a session, so a
@@ -570,7 +571,6 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     const swept = microcompact(session.transcript, KEEP_LAST_N_BOUNDARY);
     if (swept.cleared > 0 || swept.recapsCleared > 0) {
       session.transcript = swept.entries;
-      reconcileReadsAfterClear(session, swept.clearedIds);
       // Silent by design — closing out a finished task is background housekeeping, not
       // something the user should watch scroll by.
     }
@@ -661,8 +661,23 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // `workingSetFull` lets read_file short-circuit a re-read of a file already shown.
     const workingSet = await buildWorkingSet(session.toolContext);
     session.toolContext.workingSetFull = workingSet.fullPaths;
+    // The other half of "what can the model still see": full reads still sitting in the
+    // transcript. Derived here, AFTER any compaction above, so it can never disagree
+    // with the bytes this step is about to send. This is what makes a stored presence
+    // bit — and the ledger surgery that used to keep one honest — unnecessary.
+    session.toolContext.transcriptFull = fullReadPaths(session.transcript, (p) => {
+      try {
+        return resolvePath(session.toolContext, p);
+      } catch {
+        return undefined;
+      }
+    });
 
     let result: StreamResult;
+    // The transcript half of what we are about to send, measured the same way the
+    // compaction bars measure it — so the provider's reported total minus this is the
+    // real size of everything else in the prompt.
+    const sentTranscriptTokens = estimateEntriesTokens(session.transcript);
     const request = buildRequest(session, relevantMap, workingSet.text, bgEvents, stepTools());
     try {
       result = await streamModel(request, options);
@@ -674,7 +689,19 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // Every model call's usage counts toward the task total — a task (one turn)
     // may span several calls across tool rounds, and the UI sums them.
     emitUsage(result, options);
-    if (result.usage) usages.push(result.usage);
+    if (result.usage) {
+      usages.push(result.usage);
+      // Measure, don't guess. The provider just told us exactly how big the prompt was;
+      // subtracting the transcript we measured on the way out leaves the fixed overhead
+      // the bars were blind to. Recomputed every call, so it tracks a growing tool
+      // catalog or working set instead of being a constant someone chose once.
+      if (result.usage.promptTokens > 0) {
+        session.contextOverhead = {
+          tokens: measuredOverhead(result.usage.promptTokens, sentTranscriptTokens),
+          model: session.modelConfig.model,
+        };
+      }
+    }
 
     // The provider can end a turn for reasons that are NOT "finished answering".
     // Without checking, a reply cut off at the output ceiling looks identical to a
@@ -748,7 +775,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
       }
       const tool = lookup(call.name);
       if (!tool) {
-        return { call, output: `Error: unknown tool '${call.name}'.`, summary: `unknown tool '${call.name}'`, isError: true, detail: undefined as string | undefined };
+        return { call, output: `Error: unknown tool '${call.name}'.`, summary: `unknown tool '${call.name}'`, isError: true, detail: undefined as string | undefined, fullContentOf: undefined as string | undefined };
       }
       // Belt-and-suspenders for plan mode: the schema filter already hides mutating
       // tools, but if the model calls one anyway, refuse it instead of running it.
@@ -788,7 +815,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
         if (decision === "allow-all") ctx.guardAllowAll = true;
       }
       const result = await tool.execute(parseArgs(call.arguments), session.toolContext);
-      return { call, output: result.output, summary: result.summary, isError: result.isError, detail: result.detail, quiet: result.quiet };
+      return { call, output: result.output, summary: result.summary, isError: result.isError, detail: result.detail, quiet: result.quiet, fullContentOf: result.fullContentOf };
     };
 
     // Emit each tool's END the instant IT finishes — not batched after the whole
@@ -841,6 +868,9 @@ export async function respond(session: Session, options: RespondOptions = {}): P
         ...(result.summary ? { summary: result.summary } : {}),
         ...(result.detail ? { detail: result.detail } : {}),
         ...(result.isError ? { isError: true } : {}),
+        // Presence, as recorded by the tool that knows: this result IS the whole
+        // content of that file. Not display — the presence derivation reads it.
+        ...(result.fullContentOf ? { fullContentOf: result.fullContentOf } : {}),
       });
     }
     await options.persist?.(); // durable: tool results recorded, transcript well-formed
@@ -1113,14 +1143,26 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
   // context than this arithmetic believed, and every threshold fired that much too late.
   // Counting it here restores the meaning of the bars — they are about how full the
   // context is, not how long the transcript is.
-  const mcpTokens = session.toolContext.mcp?.estimatedTokens() ?? 0;
-  const used = () => estimateEntriesTokens(session.transcript) + mcpTokens;
+  // Everything outside the transcript counts too, because the bars are about how full
+  // the CONTEXT is, not how long the transcript is. Once a call has reported usage we
+  // know that overhead exactly (system prompt + every tool schema + the working set
+  // block + relevance map + todos + governor); until then, fall back to the one piece
+  // we could always estimate. MCP schemas are inside the measured figure, so they are
+  // only added in the fallback — counting both would double them.
+  //
+  // A measurement taken on a DIFFERENT model does not transfer: switching provider
+  // changes the tool-schema serialisation and the prompt shape. Falling back is the
+  // safe direction — it under-counts for one call, which fires the bars early rather
+  // than late, and the next call re-measures.
+  const measured = session.contextOverhead;
+  const overhead =
+    measured && measured.model === model ? measured.tokens : (session.toolContext.mcp?.estimatedTokens() ?? 0);
+  const used = () => estimateEntriesTokens(session.transcript) + overhead;
 
   if (used() >= microBar) {
-    const { entries, cleared, clearedIds, recapsCleared } = microcompact(session.transcript);
+    const { entries, cleared, recapsCleared } = microcompact(session.transcript);
     if (cleared > 0 || recapsCleared > 0) {
       session.transcript = entries;
-      reconcileReadsAfterClear(session, clearedIds);
       // Silent by design — trimming stale context is background machinery.
     }
   }
@@ -1129,39 +1171,6 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
   // a doomed summarizer call every turn.
   if (used() >= autoBar && (session.compactFailures ?? 0) < MAX_COMPACT_FAILURES) {
     await autocompact(session, options);
-  }
-}
-
-/**
- * When microcompact clears a file read's body, that file's content is gone from
- * context — but the read ledger still said "you have it," so a re-read would be
- * wrongly deduped to "unchanged, use your earlier read" (which no longer exists).
- * Drop those files from the ledger so a needed re-read returns real content again —
- * UNLESS the file's CURRENT FULL content is still in the live working set (the volatile
- * tail), where the ledger entry stays valid. Keying off the working set's full-content
- * set (not a fixed file count) means a localized file — only partially present — is
- * correctly dropped, so a re-read of it isn't wrongly deduped to a stub.
- */
-function reconcileReadsAfterClear(session: Session, clearedIds: string[]): void {
-  if (clearedIds.length === 0) return;
-  const ctx = session.toolContext;
-  const active = ctx.workingSetFull ?? new Set<string>();
-  // Map each tool result's id back to the read_file/read_symbol call that produced it.
-  const callById = new Map<string, ToolCallRecord>();
-  for (const e of session.transcript) {
-    if (e.role === "assistant" && e.toolCalls) for (const tc of e.toolCalls) callById.set(tc.id, tc);
-  }
-  for (const id of clearedIds) {
-    const call = callById.get(id);
-    if (!call || (call.name !== "read_file" && call.name !== "read_symbol")) continue;
-    try {
-      const raw = JSON.parse(call.arguments) as { path?: unknown };
-      if (typeof raw.path !== "string") continue;
-      const abs = resolvePath(ctx, raw.path);
-      if (!active.has(abs)) ctx.reads.delete(abs);
-    } catch {
-      /* malformed args — nothing to reconcile */
-    }
   }
 }
 

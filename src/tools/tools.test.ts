@@ -37,10 +37,27 @@ test("read_file caps a default read at the line limit and says there's more", as
   assert.doesNotMatch(r.output, /\bL2001\b/); // line 2001 wasn't sent
 });
 
+test("a read capped by the line limit is NOT recorded as a whole-file read", async () => {
+  const ctx = freshCtx();
+  const lines = Array.from({ length: 2500 }, (_, i) => `L${i + 1}`).join("\n");
+  const p = join(ctx.cwd, "big.txt");
+  await fs.writeFile(p, lines);
+  await readFile.execute({ path: "big.txt" }, ctx);
+  // 2000 of 2500 lines went out. Recording that as "full" let a later re-read be
+  // answered "unchanged since you last read" for 500 lines never shown.
+  assert.equal(ctx.reads.get(p)?.full, false);
+  ctx.transcriptFull = new Set([p]); // even with the result still in context
+  const again = await readFile.execute({ path: "big.txt" }, ctx);
+  assert.doesNotMatch(again.output, /unchanged since you last read/);
+});
+
 test("read_file dedups an unchanged re-read", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "alpha");
   await readFile.execute({ path: "c.txt" }, ctx);
+  // Dedup means "you already have this" — so the earlier read has to still BE in
+  // context. The engine derives that set each turn; a fixture has to declare it.
+  ctx.transcriptFull = new Set([join(ctx.cwd, "c.txt")]);
   const again = await readFile.execute({ path: "c.txt" }, ctx);
   assert.match(again.output, /unchanged since you last read/);
 });

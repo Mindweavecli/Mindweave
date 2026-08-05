@@ -41,7 +41,19 @@ export interface ToolCallRecord {
 export type Entry =
   | { role: "user"; content: string }
   | { role: "assistant"; content: string; toolCalls?: ToolCallRecord[] }
-  | { role: "tool"; toolCallId: string; content: string; summary?: string; detail?: string; isError?: boolean }
+  | {
+      role: "tool";
+      toolCallId: string;
+      content: string;
+      summary?: string;
+      detail?: string;
+      isError?: boolean;
+      /** Absolute path whose WHOLE content this result carries (see ToolResult). While
+       *  this entry is unstubbed the model can see that file; `memory/presence.ts` reads
+       *  it. Absent on results that aren't whole-file reads, and on sessions written
+       *  before it existed — presence falls back to the call's arguments there. */
+      fullContentOf?: string;
+    }
   | { role: "summary"; content: string };
 
 /** Lightweight session descriptor for the resume picker (no transcript body). */
@@ -70,6 +82,21 @@ export interface Session {
   createdAt: number;
   transcript: Entry[];
   toolContext: ToolContext;
+  /**
+   * Everything in the prompt that is NOT the transcript, as last MEASURED from the
+   * provider's reported prompt size: the system prompt, every tool schema, the working
+   * set block, the relevance map, todos, the governor. The compaction bars ask "how
+   * full is the context", so they have to include it — estimating the transcript alone
+   * made every bar fire late by however large this is. Undefined until the first call
+   * of a session reports usage; the bars fall back to their estimate until then.
+   *
+   * The MODEL it was measured against is stored with it, and the bars use the figure
+   * only when the two still match. A measurement carries a provider's tool-schema
+   * serialisation and prompt shape baked in, so switching model silently invalidates
+   * it — pairing them means the switch invalidates it by construction instead of
+   * relying on someone remembering to clear it.
+   */
+  contextOverhead?: { tokens: number; model: string };
   /** Contents of the project's MINDWEAVE.md, injected into the system prompt. "" if none. */
   projectMemory: string;
   /**

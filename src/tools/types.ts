@@ -23,6 +23,18 @@ export interface ToolResult {
   isError?: boolean;
 
   /**
+   * Set by a tool whose `output` IS the whole current content of this absolute path.
+   * A fact, recorded at the moment it is true, and the input to the presence
+   * derivation (`memory/presence.ts`): while this result is in the transcript
+   * unstubbed, the model can see that file. Never sent to the model.
+   *
+   * It is stored rather than re-derived from the call's arguments later because
+   * arguments are relative and `cd` moves the working directory mid-session, so the
+   * same recorded path can resolve to a different file than it did when read.
+   */
+  fullContentOf?: string;
+
+  /**
    * A short, human one-liner for the live UI (e.g. "read src/app.ts (40
    * lines)"). Display-only — never sent to the model. Separating this from
    * `output` keeps the transcript clean without starving the model of detail.
@@ -257,6 +269,15 @@ export interface ToolContext {
    * — the model already has it, fresh — instead of re-sending it.
    */
   workingSetFull?: Set<string>;
+  /**
+   * Files whose WHOLE content is still present in the TRANSCRIPT — a full read whose
+   * result microcompaction has not cleared to a stub. Derived by the engine each turn
+   * (see `memory/presence.ts`), never stored on the ledger: "the model can see this"
+   * is a property of the bytes being sent, and a stored copy of it goes stale the
+   * moment the transcript is compacted. Absent means "don't assume presence", which
+   * costs a re-read and can never cost a lie.
+   */
+  transcriptFull?: Set<string>;
   /**
    * The pool of connected MCP servers, when the session has any. Their tools are merged
    * into the model's tool list and dispatched through the same path as built-ins, so

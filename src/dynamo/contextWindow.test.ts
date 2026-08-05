@@ -12,7 +12,20 @@ import {
   microCompactThreshold,
   autoBarFor,
   microBarFor,
+  measuredOverhead,
 } from "./contextWindow.js";
+
+test("overhead is what the provider counted minus the transcript we measured", () => {
+  // 120K prompt, 80K of it transcript → 40K of system prompt, tool schemas, working
+  // set and relevance map that the bars used to be blind to.
+  assert.equal(measuredOverhead(120_000, 80_000), 40_000);
+});
+
+test("overhead never goes negative when our estimate reads high", () => {
+  // The transcript estimator is deliberately conservative, so it can exceed the real
+  // count. A negative overhead would push the bars LATER — the exact failure removed.
+  assert.equal(measuredOverhead(70_000, 80_000), 0);
+});
 
 test("DeepSeek anchors to its sharp window (not its 1M storage cap)", () => {
   assert.equal(sharpContextWindow("deepseek-v4-pro"), 256_000);

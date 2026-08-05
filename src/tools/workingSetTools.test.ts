@@ -47,7 +47,9 @@ test("read_file still returns content for a file NOT in the working set", async 
   await fs.writeFile(p, "const other = 7;\n");
   await readFile.execute({ path: "b.ts" }, ctx);
   ctx.workingSetFull = new Set(); // nothing held
+  ctx.transcriptFull = new Set([p]); // but the original read is still in the transcript
   const r = await readFile.execute({ path: "b.ts" }, ctx);
-  // Unchanged + full prior read → normal dedup note (not the working-set note).
+  // Unchanged + full prior read + still in context → normal dedup note (not the
+  // working-set note). Drop the line above and the content comes back instead.
   assert.match(r.output, /unchanged/);
 });

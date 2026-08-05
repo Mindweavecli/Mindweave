@@ -249,6 +249,37 @@ points instead of one, which is a reviewability problem, not a token problem. Th
 worth building for that reason and not the one originally assumed, and the difference
 would have been invisible without instrumenting the event stream.
 
+**A store may own a fact. It may not own a claim about what the model can see.** The
+read ledger recorded "this file was read whole, at this mtime and size." That is a
+fact, it is what the edit freshness gate needs, and it stays true forever. The same
+bit was also read as "so the content is in context, skip the re-read." That is not a
+fact about the past, it is a property of the bytes about to be sent, and
+microcompaction can delete those bytes at any moment. The bit went stale exactly as
+often as compaction ran, and the model was answered "unchanged, use your earlier read"
+for content that no longer existed. The repair was to delete the file's ledger entry
+after every clear, which fixed the lie by destroying the fact: staleness state, focus
+regions and working-set candidacy went with it, so a large file quietly stopped being
+refreshed at all. Note the shape. The lie and the repair for it were both consequences
+of one store holding two kinds of thing.
+
+The rule that falls out, and the one to apply when adding any knowledge layer:
+
+- **Records** are append-only facts. The transcript, the filesystem, the ledger's
+  mtime/size. Compaction changes what is *rendered* from a record, never the fact.
+- **Derivations** are pure functions of the records, recomputed every step, holding
+  nothing of their own: the working set, the relevance map, presence. A derivation
+  cannot drift, because there is nothing in it to go stale.
+- **Standing knowledge** is injected whole into every request: todos, the rendered
+  governor, the memory index. Its fidelity is full by construction.
+
+**Only a derivation may claim that content is in context.** `workingSetFull` answers it
+for the volatile tail and `memory/presence.ts` answers it for the transcript, both
+recomputed after compaction and before assembly, so neither can disagree with what is
+sent. A new layer either contributes records or registers as standing knowledge. There
+is no third category where the engine consults something nobody recomputes, and that
+missing category is where this bug lived. Reconciliation code between two stores is the
+smell: it is the tax on a claim filed in the wrong place.
+
 ---
 
 ## Where things live

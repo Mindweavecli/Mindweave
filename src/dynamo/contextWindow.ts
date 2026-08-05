@@ -64,6 +64,21 @@ const MICRO_CEILING = 96_000;
  */
 const MICRO_MAX_SHARE_OF_AUTO = 0.6;
 
+/**
+ * The part of the prompt that is NOT the transcript, measured rather than assumed:
+ * what the provider said the whole prompt was, minus what we measured the transcript
+ * to be on the way out. That remainder is the system prompt, every tool schema, the
+ * working-set block, the relevance map, todos and the governor — none of which the
+ * bars could see when they counted only the transcript.
+ *
+ * Clamped at zero. The transcript estimator is deliberately conservative and can read
+ * HIGHER than the provider's real count; a negative overhead would then push the bars
+ * later, which is precisely the failure this removes.
+ */
+export function measuredOverhead(promptTokens: number, transcriptTokens: number): number {
+  return Math.max(0, promptTokens - transcriptTokens);
+}
+
 /** The model's usable context window, as its driver reports it. */
 export function sharpContextWindow(model: string): number {
   return manifestForModel(model).contextWindow(model);

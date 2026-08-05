@@ -48,7 +48,8 @@ export const KEEP_LAST_N = 8;
  *  many recent observations, since the finished task's detail is no longer load-bearing. */
 export const KEEP_LAST_N_BOUNDARY = 2;
 
-const CLEARED_STUB = "[old tool result cleared to save context — re-read the file/search if you need it again]";
+export const CLEARED_STUB =
+  "[old tool result cleared to save context — re-read the file/search if you need it again]";
 
 /** Old assistant prose (a "here's what I built" recap) is what a weaker model latches
  *  onto and regresses to. Beyond the recent window we condense these to a stub so a
@@ -108,6 +109,20 @@ export function estimateEntriesTokens(entries: Entry[]): number {
 /**
  * Layer 1: clear the bodies of OLD tool results, keeping the last `keepLastN`
  * intact. Pure — returns a new transcript and how many were cleared.
+ *
+ * WHAT GOES FIRST, AND WHY. The order below is not taste; it falls out of one rule:
+ * evict by RECONSTRUCTIBILITY — the more cheaply an authoritative record elsewhere can
+ * regenerate a thing, the sooner it goes, and whatever is left behind must carry the
+ * key needed to get it back. So: the inputs of old edit/write calls go first and go to
+ * nothing, because the filesystem is the record and the sent body is already dead
+ * weight. Then the bodies of old tool results, whose source of truth is external (a
+ * file, a command, a search) — to a STUB that keeps the first line, and that first line
+ * is the restoration key: it is what makes re-acquisition an ordinary tool call instead
+ * of a special mechanism. Then old assistant recaps, reconstructible from the summary
+ * layer. The conversation itself is never touched at this layer, because no record
+ * anywhere can regenerate intent — summarization is its only admissible compression.
+ * And results the model has not acted on yet are never touched at any bar: unacted
+ * knowledge is full fidelity or the model is working blind.
  *
  * What it must never touch: user/assistant messages (the actual conversation),
  * the last N tool results (the live working set), and any tool result that

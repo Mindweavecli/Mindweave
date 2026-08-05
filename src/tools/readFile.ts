@@ -112,9 +112,13 @@ export const readFile: Tool = {
       return { output: WORKING_SET_HELD, summary: `read ${relativize(ctx, filePath)} (in working set)` };
     }
 
-    // Read-dedup: if the model already read this whole file and it hasn't
-    // changed since (same mtime + size), don't re-send the content.
-    if (full && prior?.full && unchanged) {
+    // Read-dedup: if the model already read this whole file, it hasn't changed since
+    // (same mtime + size), and that earlier read is STILL IN the transcript, don't
+    // re-send the content. The presence half is derived per turn rather than read off
+    // the ledger: microcompaction can clear the earlier result's body at any time, and
+    // a stored "you have it" bit would then be a lie the model obeys. No presence set
+    // (a subagent, a test) means no dedup — a wasted read, never a phantom one.
+    if (full && prior?.full && unchanged && ctx.transcriptFull?.has(filePath)) {
       touch(ctx, filePath);
       return { output: FILE_UNCHANGED, summary: `read ${relativize(ctx, filePath)} (unchanged)` };
     }
@@ -158,21 +162,29 @@ export const readFile: Tool = {
     if (limit === undefined && end < totalLines) {
       body += `\n… (showing lines ${start}-${end} of ${totalLines}; pass offset to read further)`;
     }
-    if (body.length > MAX_OUTPUT_CHARS) {
+    const charTruncated = body.length > MAX_OUTPUT_CHARS;
+    if (charTruncated) {
       body =
         body.slice(0, MAX_OUTPUT_CHARS) +
         "\n… (truncated — read a smaller range with offset/limit)";
     }
 
+    // "Whole file" means the whole file ACTUALLY WENT OUT, not merely that the caller
+    // asked for no range. A 2500-line file read with no offset stops at the MAX_LINES
+    // cap, and recording that as full let a later re-read be answered "unchanged since
+    // you last read" for 500 lines the model was never shown. Same for the character
+    // cap. The flag is the dedup's whole basis, so it has to mean what it says.
+    const wholeFileSent = full && end >= totalLines && !charTruncated;
+
     // Record the read so edit_file / write_file know this file has been seen, so a
     // later identical read can be deduped, and so it enters the working set (recency +
-    // the focused range for a ranged read, used to localize a large file).
+    // the focused range for a partial read, used to localize a large file).
     ctx.reads.set(filePath, {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
-      full,
+      full: wholeFileSent,
       touchedAt: nextTouch(),
-      focus: !full ? addFocus(prior?.focus, { start, end }) : prior?.focus,
+      focus: !wholeFileSent ? addFocus(prior?.focus, { start, end }) : prior?.focus,
     });
 
     const shown = relativize(ctx, filePath);
@@ -181,7 +193,11 @@ export const readFile: Tool = {
       ? `read ${shown} lines ${start}-${end}`
       : `read ${shown} (${slice.length} lines)`;
 
-    return { output: body, summary };
+    // Presence, recorded as a FACT at the moment it is true, keyed by the absolute path
+    // this call actually resolved to. Re-deriving it later by re-resolving these
+    // arguments would be a guess: `cd` moves the working directory mid-session, so the
+    // same recorded "a.ts" can resolve to a different file than it did when read.
+    return { output: body, summary, ...(wholeFileSent ? { fullContentOf: filePath } : {}) };
   },
 };
 

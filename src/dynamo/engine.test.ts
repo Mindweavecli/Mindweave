@@ -93,19 +93,38 @@ test("the turn's MCP tools come from ONE snapshot, not two live reads", () => {
   assert.doesNotMatch(engineSource, /mcp\?\.asTool\(/, "dispatch must come from the same snapshot");
 });
 
-test("compaction counts the MCP catalog, not just the transcript", () => {
-  // Tool schemas are sent every turn but live outside the transcript, so the bars could
-  // not see them and fired that much too late. Also silent when broken.
+test("compaction counts the whole prompt, not just the transcript", () => {
+  // Everything sent every turn but living outside the transcript — the system prompt,
+  // every tool schema, the working-set block, the relevance map — used to be invisible
+  // to the bars, so they fired that much too late. Also silent when broken.
   const body = engineSource.match(/async function maybeCompact\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1];
   assert.ok(body, "maybeCompact not found — did it get renamed?");
-  assert.match(body, /estimatedTokens\(\)/, "the catalog's cost must be computed");
-  // Computing it is not enough: the figure the bars are compared against has to
-  // actually include it. Asserting only that the call appears passes even when the
+  // Computing an overhead is not enough: the figure the bars are compared against has
+  // to actually include it. Asserting only that the term appears passes even when the
   // result is dropped on the floor.
   const used = body.match(/const used = \(\) =>([^;]*);/)?.[1];
   assert.ok(used, "the budget helper not found — did it get renamed?");
   assert.match(used, /estimateEntriesTokens\(session\.transcript\)/, "the transcript is part of the budget");
-  assert.match(used, /mcpTokens/, "and so is the MCP catalog");
+  assert.match(used, /overhead/, "and so is everything outside the transcript");
+  // Both halves of the overhead must survive: the MEASURED prompt size once a call has
+  // reported one, and the catalog estimate as the fallback before that. Lose either and
+  // the bars go blind again to whichever is missing.
+  assert.match(body, /const overhead =/, "the overhead term not found — did it get renamed?");
+  assert.match(body, /contextOverhead/, "the measured prompt size is preferred");
+  assert.match(body, /estimatedTokens\(\)/, "with the MCP catalog as the fallback");
+  // A measurement from ANOTHER model must not be reused: switching provider changes the
+  // tool-schema serialisation and the prompt shape, so the figure stops being about this
+  // request. Without this comparison the first call after a /provider switch sizes its
+  // bars from the old provider's prompt.
+  assert.match(body, /\.model === model/, "a measurement from another model must not be reused");
+  // And the measured branch must actually be fed, or it is dead code that reads as safety.
+  assert.match(
+    engineSource,
+    /contextOverhead = \{/,
+    "reported usage must be recorded as the overhead",
+  );
+  assert.match(engineSource, /tokens: measuredOverhead\(/, "…with the measured figure");
+  assert.match(engineSource, /model: session\.modelConfig\.model/, "…and the model it belongs to");
   assert.doesNotMatch(body, /estimateEntriesTokens\(session\.transcript\) >=/, "no bar may be compared against the transcript alone");
 });
 
