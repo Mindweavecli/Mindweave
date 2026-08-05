@@ -58,19 +58,27 @@ If the numbers say the current architecture is worse, it changes. That has alrea
 
 Open a Discussion before writing code for anything core-shaped. We will talk it through, and where it makes sense we will test it properly and let the result decide. Being told no early is a better outcome than spending an afternoon on something that was never going to be merged, and this is written down precisely so that conversation can start honestly.
 
-## v1.6: it tells you what your app is doing
+## v1.7: it knows what it can still see
 
-Start a dev server and the agent now tells you when it is actually up, stays quiet when you close it yourself, and still knows it is stopped if you ask later. All of it came from watching it get this wrong.
+A long session throws work away to stay sharp: old file contents get cleared out to make room. The agent was not told, so it went on answering from files it no longer had. This release makes what it believes about your code match what is actually there, and does the same for undo.
 
-**You are told when the app is up, not just when it was launched.** Starting something long-running only ever produced one event: the moment it ended. So for a server, which is not supposed to end, there was nothing to report, and the agent would say it would let you know and then never could. A background process that is still alive after its startup window has come up, and that is now its own event. The agent says it is starting, then tells you when it is running.
+**A file it no longer has is read again.** Reading a file recorded that it had been read, and a later read was skipped as redundant. That record outlived the content: once the older part of a session was cleared, the file was gone but the note saying "you have this" remained, so the agent worked from a copy it could not see. Whether a file is present is now worked out from what is actually being sent, every turn, rather than remembered separately.
 
-**Close your app and the agent says nothing.** It also does not reopen it. That was already the intent, but the rule behind it read the exit code, and exit codes cannot tell these cases apart: on Windows a closed app and a port conflict both report 1, and anything stopped by a signal reports nothing at all. The question is now whether the thing ever came up. If you saw it running, you closing it is your business. If it never came up, you could not have known it failed, so you get told, with the error output.
+**A partly-read file is no longer treated as fully read.** Reading a large file stops at a line limit and says so. That still counted as having read the whole thing, so a later read could be skipped for a file the agent had only seen the first part of.
 
-**It still knows what happened, even when it stays quiet.** Stops that were not worth interrupting for used to be discarded outright, so the agent could not say your app had stopped, and had no answer if you asked why it was down. Every ending is now recorded; only the decision to interrupt you is conditional. Ask whether your app is running and you get a real answer, including whether you stopped it or it stopped itself.
+**Compaction measures the whole prompt.** The point at which a session gets summarised was measured against the conversation alone, while the system prompt, every tool description, and the current contents of the files being worked on were all sent too and none of it counted. Sessions therefore ran fuller than intended. What gets measured is now what gets sent.
 
-**You can say what you want to hear about.** A command sent to the background takes a `notify` setting: tell me when it finishes, tell me only if it fails to start, or say nothing at all. Before this, the kind of thing being run was guessed from the command name, which meant `cargo run`, `docker compose up`, `flask run` and a plain path to a binary were all mistaken for short tasks. The guess remains as a default; it is no longer the decision.
+**Undo will not overwrite work you did yourself.** If you edit a file after the agent touched it, `/undo` used to put its own version back over the top of yours, silently. It now compares what is on disk against what it wrote, leaves anything that has changed alone, and tells you which files it did not touch.
 
-**Starting a second copy of something already running is refused.** That check used to apply only to commands whose names looked like dev servers, so most things could quietly be launched twice and collide.
+**Undo survives a file it cannot write.** A file held open by an editor or a dev server used to take the whole rollback with it: the checkpoint was discarded before the writing was attempted, so a partial failure left no way to retry and reported success anyway. Failures are now kept for a second attempt, and reported.
+
+**Undo says what it did not cover, and tells the agent.** Anything a shell command changed is outside the net, and is now called out instead of being folded into "the turn was undone". The agent is also told when you roll something back, so it stops describing edits that are no longer on disk.
+
+**You can look at undo before using it.** `/undo list` shows which turns can be rolled back and what each one touched; `/undo 3` steps back that many.
+
+**Providers are picked separately from models.** `/provider` chooses who serves the project and shows which providers you have a key for; `/model` then offers that provider's models rather than every model from everyone. Choosing a provider you have no key for asks for one and changes nothing until you give it.
+
+**`/help` exists.** It lists every command, including the ones your project adds.
 
 **Next up:** more of the same. The core is being gone through subsystem by subsystem, looking for the things that only show up when you actually run it.
 
@@ -126,12 +134,14 @@ DEEPSEEK_API_KEY=your-key-here     # deepseek-v4-flash, deepseek-v4-pro
 ANTHROPIC_API_KEY=your-key-here    # claude-sonnet-5, claude-opus-5
 ```
 
-You only need the key for the provider whose models you use. Set both and you can switch between them with `/model` in the same project. Set a key during the first-run prompt, in `~/.mindweave/.env`, or as an environment variable.
+You only need the key for the provider whose models you use. Set both and you can switch between them with `/provider` in the same project. Set a key during the first-run prompt, in `~/.mindweave/.env`, or as an environment variable.
 
-## Choosing a model
+## Choosing a provider and model
 
-- `/model` picks which model answers.
+- `/provider` picks who serves the project, and shows which providers you have a key for.
+- `/model` picks which of that provider's models answers.
 - `/think` picks how hard it reasons.
+- `/help` lists every command.
 
 Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/drivers/PROVIDERS.md) for the current model list, and [`src/drivers/README.md`](src/drivers/README.md) if you want to build a driver for another model.
 
@@ -172,6 +182,7 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 - [x] **v1.4: MCP hardening with resources and server prompts, and rebuilt editing tools**
 - [x] **v1.5: processes cleaned up properly, an Esc that actually cancels, per-model compaction**
 - [x] **v1.6: background apps report when they are up, and stay quiet when you close them**
+- [x] **v1.7: it re-reads what it can no longer see, undo that will not overwrite your work, providers chosen separately from models**
 - [ ] **Core hardening**, the current focus: every subsystem the agent actually runs, gone through one at a time
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …), community-built
 - [ ] Verified macOS / Linux support
