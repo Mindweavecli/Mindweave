@@ -92,6 +92,7 @@ interface DriverManifest {
   normalize(cfg: ModelConfig): ModelConfig;  // coerce a saved/unknown selection
 
   bufferedOutputTokens?(model): number;  // optional: your ceiling on a buffered call
+  acceptsImages?(model): boolean;        // optional: can this model SEE an image?
 }
 
 // index.ts — the wire half, loaded only when your provider is selected
@@ -102,6 +103,41 @@ interface Driver extends DriverManifest {
   sanitizeText?(raw: string): string;        // optional: repair leaked markup
 }
 ```
+
+### Vision, if your provider has it
+
+Vision is two lines of work, and neither of them is in core.
+
+**1. State the fact.** Add `acceptsImages(model)` to your manifest. Leave it out and
+the answer is no, which is the right default: an attached image is then named for the
+model but never sent, and the user is told why. You are reporting a capability, not
+choosing a behaviour — core owns the decision about how to degrade, which is why a
+provider can gain vision by flipping this one function with no change anywhere else.
+
+**2. Render the bytes.** When the running model accepts images, user messages arrive
+with an `images` array alongside `content`, already loaded and validated:
+
+```ts
+interface ImagePart { path: string; mediaType: string; data: string }  // data = base64
+```
+
+Core reads the file, enforces the format, size and dimension caps, and hands every
+driver the same bytes; you only put them in your envelope. The two shapes in the wild:
+
+```ts
+// Anthropic-shaped (see anthropic/client.ts)
+{ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } }
+
+// OpenAI-compatible — a data URI in an image_url part
+{ type: "image_url", image_url: { url: `data:${img.mediaType};base64,${img.data}` } }
+```
+
+Put images BEFORE the text in the same message; every provider reads that ordering
+more reliably than the reverse. Do not resize — providers downscale oversized images
+themselves, and core deliberately ships no image-processing dependency.
+
+A driver that ignores `images` entirely still compiles and still behaves exactly as it
+did before vision existed. That is the point of the field being additive.
 
 `normalize` is how a provider stays authoritative over its own id space: core hands
 it whatever was saved in the project config (possibly a model that no longer

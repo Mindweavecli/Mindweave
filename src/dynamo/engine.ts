@@ -14,7 +14,7 @@
  * can later move to a server unchanged, with tools executing on the client.
  */
 import { activeDriver, ensureDriver } from "../drivers/registry.js";
-import type { ChatMessage, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
+import type { ChatMessage, ImagePart, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
 import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, VERIFY_NUDGE } from "./verify.js";
 import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, interpretGuardChoice } from "./guard.js";
@@ -22,7 +22,8 @@ import { findTool, toolSchemas } from "../tools/registry.js";
 import { commandShellLabel } from "../tools/runCommand.js";
 import { isInteractiveServerCommand } from "../tools/backgroundShells.js";
 import { basePrompt } from "./prompt.js";
-import { relative } from "node:path";
+import { basename, relative } from "node:path";
+import { promises as fsp } from "node:fs";
 import { relativize, resolvePath, rootLabel } from "../tools/paths.js";
 import { todoListText } from "../tools/todo.js";
 import { renderRules, renderSkillCatalog } from "../governor/index.js";
@@ -398,16 +399,62 @@ function workspaceText(session: Session): string {
  *   - `context`  — the VOLATILE per-turn map + task list, rendered at the tail so it
  *                  never invalidates the cached prefix.
  */
+/**
+ * Read the bytes for every image still live in the transcript, keyed by path.
+ *
+ * Bytes are loaded HERE, once per turn, rather than stored in the transcript or read
+ * by each driver. That keeps the session file small, keeps drivers off the filesystem
+ * (they format, they don't fetch), and means the caps and validation live in one place.
+ * A file that has since been deleted or become unreadable is simply absent from the
+ * map; `buildRequest` turns that into a line the model can read, never a crash.
+ */
+async function loadImagePayloads(session: Session): Promise<Map<string, string>> {
+  const paths = new Set<string>();
+  for (const e of session.transcript) {
+    if (e.role === "user" && e.images) for (const img of e.images) paths.add(img.path);
+  }
+  const out = new Map<string, string>();
+  await Promise.all(
+    [...paths].map(async (p) => {
+      try {
+        out.set(p, (await fsp.readFile(p)).toString("base64"));
+      } catch {
+        // Gone or unreadable — deliberately left out of the map.
+      }
+    }),
+  );
+  return out;
+}
+
 function buildRequest(
   session: Session,
   relevantMap: string,
   workingFiles: string,
   bgEvents: string[],
   tools: ReturnType<typeof toolSchemas>,
+  imagePayloads: Map<string, string> = new Map(),
 ): ModelRequest {
   const messages: ChatMessage[] = [];
   for (const e of session.transcript) {
     if (e.role === "user" || e.role === "summary") {
+      // Attached images ride with the message, but only while their payload is still
+      // live: microcompaction drops the refs once the turn is old, and a file deleted
+      // since it was attached simply isn't in the payload map. Either way the model is
+      // TOLD rather than quietly handed a message that claims an image it cannot see.
+      const refs = e.role === "user" ? e.images : undefined;
+      if (refs && refs.length > 0) {
+        const images: ImagePart[] = [];
+        const missing: string[] = [];
+        for (const ref of refs) {
+          const data = imagePayloads.get(ref.path);
+          if (data) images.push({ path: ref.path, mediaType: ref.mediaType, data });
+          else missing.push(basename(ref.path));
+        }
+        const content =
+          missing.length > 0 ? `${e.content}\n\n[${missing.join(", ")} could not be read from disk]` : e.content;
+        messages.push({ role: "user", content, ...(images.length > 0 ? { images } : {}) });
+        continue;
+      }
       messages.push({ role: "user", content: e.content });
     } else if (e.role === "assistant") {
       messages.push({
@@ -678,7 +725,14 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // compaction bars measure it — so the provider's reported total minus this is the
     // real size of everything else in the prompt.
     const sentTranscriptTokens = estimateEntriesTokens(session.transcript);
-    const request = buildRequest(session, relevantMap, workingSet.text, bgEvents, stepTools());
+    const request = buildRequest(
+      session,
+      relevantMap,
+      workingSet.text,
+      bgEvents,
+      stepTools(),
+      await loadImagePayloads(session),
+    );
     try {
       result = await streamModel(request, options);
     } catch (error) {

@@ -367,3 +367,42 @@ test("toTurn carries the stop reason through", () => {
   const normal = { content: [{ type: "text", text: "done" }], stop_reason: "end_turn" } as unknown as Anthropic.Message;
   assert.equal(toTurn(normal).stop, "end");
 });
+
+test("images render as base64 blocks, before the text, each one labelled", () => {
+  const { messages } = renderMessages({
+    system: "S",
+    messages: [
+      {
+        role: "user",
+        content: "what is broken here?",
+        images: [{ path: "/proj/shot.png", mediaType: "image/png", data: "QUJD" }],
+      },
+    ],
+  });
+
+  assert.equal(messages.length, 1);
+  const blocks = messages[0]!.content as Anthropic.ContentBlockParam[];
+  // Image before text: the documented ordering for reliable reading.
+  assert.equal(blocks[0]!.type, "text");
+  assert.match((blocks[0] as { text: string }).text, /shot\.png/, "labelled so later turns can refer to it");
+  assert.equal(blocks[1]!.type, "image");
+  assert.deepEqual((blocks[1] as { source: unknown }).source, {
+    type: "base64",
+    media_type: "image/png",
+    data: "QUJD",
+  });
+  assert.equal(blocks[2]!.type, "text");
+  assert.equal((blocks[2] as { text: string }).text, "what is broken here?");
+});
+
+test("a user message with images but no text still reaches the model", () => {
+  // Dropping it would silently swallow a dragged-in screenshot sent with no caption.
+  const { messages } = renderMessages({
+    system: "S",
+    messages: [
+      { role: "user", content: "", images: [{ path: "/p/a.png", mediaType: "image/png", data: "QQ==" }] },
+    ],
+  });
+  assert.equal(messages.length, 1);
+  assert.equal((messages[0]!.content as Anthropic.ContentBlockParam[]).length, 2);
+});

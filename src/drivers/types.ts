@@ -28,6 +28,28 @@ export interface WireToolCall {
 }
 
 /**
+ * One image travelling with a user message, with its bytes already loaded.
+ *
+ * Core resolves a stored path into this shape when it assembles a request, so a
+ * driver never touches the filesystem and every driver gets identical bytes, caps
+ * and validation. All a driver does is put them in its provider's envelope:
+ *
+ *   - Anthropic:            `{type:"image", source:{type:"base64", media_type, data}}`
+ *   - OpenAI-compatible:    `{type:"image_url", image_url:{url:"data:<type>;base64,<data>"}}`
+ *
+ * `path` rides along because it is the human-readable label and the key the model is
+ * given once the payload is evicted; it is not something a driver should read from.
+ */
+export interface ImagePart {
+  /** Absolute path the image came from. For labelling, not for loading. */
+  path: string;
+  /** IANA media type, e.g. `image/png`. */
+  mediaType: string;
+  /** The image itself, base64-encoded. */
+  data: string;
+}
+
+/**
  * A message in the conversation. Assistant messages may carry `tool_calls`; a
  * `tool` message carries one tool's result with the matching `tool_call_id`.
  * Keeping this exact shape is what lets the next request stay well-formed.
@@ -35,10 +57,18 @@ export interface WireToolCall {
  * This is OpenAI-shaped because that is what the transcript is stored as. A driver
  * for a provider with a different shape (Anthropic's content blocks, say) converts
  * on the way out and back on the way in — the stored transcript never changes.
+ *
+ * `images` is present only on user messages, only when the running model actually
+ * accepts images (core checks `acceptsImages` and degrades before it ever gets
+ * here), and is separate from `content` rather than folded into it so that adding
+ * vision changed no existing field. A driver written before images existed keeps
+ * compiling and keeps behaving exactly as it did: it simply ignores the field.
  */
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** Images attached to this message, bytes included. Only ever set on `user`. */
+  images?: ImagePart[];
   tool_calls?: WireToolCall[];
   tool_call_id?: string;
 }
@@ -254,6 +284,22 @@ export interface DriverManifest {
    * default to apply, omits it and core falls back to a conservative reserve.
    */
   bufferedOutputTokens?(model: ModelId): number;
+
+  /**
+   * Whether this model can actually SEE an image, as opposed to being told one was
+   * attached. A fact about the model, reported by the driver that knows it.
+   *
+   * This is deliberately a fact and not a behaviour: the driver states what its model
+   * can do, and core alone decides what to do about it — attach the bytes, or degrade
+   * to naming the file and telling the user why. That split is what lets a provider
+   * gain vision by flipping one function, with no change anywhere in core, and what
+   * keeps core from ever asking "which provider is this".
+   *
+   * Optional, and absent means NO. A text-only provider writes nothing; a provider
+   * whose lineup is mixed answers per model, which is the common case (a vendor
+   * usually ships vision on some tiers before others).
+   */
+  acceptsImages?(model: ModelId): boolean;
 
   /**
    * Coerce a stored/unknown model id into one this provider actually serves, and

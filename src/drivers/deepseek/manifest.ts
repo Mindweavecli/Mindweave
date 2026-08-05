@@ -124,6 +124,11 @@ export function contextWindow(model: ModelId): number {
  * effort rungs (`low`, `high`, `max`), so anything else clamps to `high`; and only
  * Pro has a maximum tier, so a Maximum choice steps down when moving to Flash.
  */
+// No `acceptsImages` here, and that is the current fact rather than an omission:
+// neither model DeepSeek documents takes image input, so an attached image is named
+// for the model but never sent. Add the function when that changes; nothing in core
+// needs to move.
+
 export function normalize(config: ModelConfig): ModelConfig {
   const model: ModelId = config.model === PRO ? PRO : FLASH;
   const thinking = config.thinking === true;

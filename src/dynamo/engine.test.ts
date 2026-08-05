@@ -134,7 +134,10 @@ test("the tool list is rebuilt per STEP, so a searched tool is callable at once"
   // be able to call it until the next user message — a lie it cannot diagnose.
   // Silent when broken: the search still reports success.
   assert.match(engineSource, /const stepTools = \(\) =>/, "the tool list must be a per-step function");
-  const call = engineSource.match(/buildRequest\(session,[^)]*\)/)?.[0];
+  // Match to the end of the argument list rather than to the first `)`, so an argument
+  // that is itself a call (or a reformat onto several lines) doesn't silently truncate
+  // the match and turn this into a test that passes by finding nothing.
+  const call = engineSource.match(/const request = buildRequest\([\s\S]*?\n\s*\);/)?.[0];
   assert.ok(call, "buildRequest call not found — did the signature change?");
   assert.match(call, /stepTools\(\)/, "each step must send the CURRENT tool list");
 });

@@ -20,22 +20,22 @@
  *     shows the chip, not the payload.
  *
  * Caps mirror read_file (256 KB / binary refusal): an attachment is a convenience,
- * not a way past the read tool's guards. Binary files (images, etc.) are skipped —
- * the text model can't use them.
+ * not a way past the read tool's guards. Non-image binaries are skipped — the model
+ * can't use them.
+ *
+ * IMAGES are the one attachment that doesn't become text. When the running model can
+ * see (core asks the driver; it never asks which provider), the image is attached as
+ * a reference and its bytes go on the wire at request time. When it can't — which is
+ * the common case, since not every provider ships vision — the file is still named
+ * for the model, and the note says plainly that this model can't see it. The same
+ * message, sent on two different models, degrades rather than failing.
  */
 import { promises as fs } from "node:fs";
-import { basename, extname, isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
+import { describeImage, isImage, isRejection, type ImageRef } from "../memory/images.js";
 
 // Same ceiling as read_file's whole-file read — keep one consistent "too big" line.
 const MAX_BYTES = 256 * 1024;
-
-// Image files are recognized so a dropped picture gets a clear "I can't read images"
-// message instead of a generic "binary, skipped" error. This is a text model, so the
-// image bytes are never sent.
-const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tiff", ".avif", ".heic"]);
-function isImage(path: string): boolean {
-  return IMAGE_EXTS.has(extname(path).toLowerCase());
-}
 
 // `@token` at a word boundary: `@` after start-or-whitespace, then a path-ish run.
 const MENTION_RE = /(^|\s)@([^\s@]+)/g;
@@ -60,6 +60,8 @@ export interface ResolvedAttachments {
   displayText: string;
   /** Compact, human-facing notes (one per resolved/skipped file) — counts, no content. */
   notes: string[];
+  /** Images to send with this message. Empty unless the running model can see them. */
+  images: ImageRef[];
 }
 
 /**
@@ -70,11 +72,16 @@ export interface ResolvedAttachments {
  * quoted phrase, or a `/` in prose never breaks a message). When nothing attaches,
  * `modelText`/`displayText` are the original text unchanged.
  */
-export async function resolveAttachments(text: string, cwd: string): Promise<ResolvedAttachments> {
+export async function resolveAttachments(
+  text: string,
+  cwd: string,
+  canSeeImages = false,
+): Promise<ResolvedAttachments> {
   const candidates = findCandidates(text);
   const seen = new Set<string>();
   const blocks: string[] = [];
   const notes: string[] = [];
+  const images: ImageRef[] = [];
   // Spans to collapse in the display line (dropped paths only), applied right-to-left.
   const collapses: { start: number; end: number; label: string }[] = [];
 
@@ -94,14 +101,30 @@ export async function resolveAttachments(text: string, cwd: string): Promise<Res
 
     const shown = displayPath(cwd, abs);
 
-    // Images: recognized and acknowledged, but NOT sent (this is a text model).
+    // Images take the vision path when the running model has eyes, and degrade to a
+    // named-but-unseen note when it doesn't. Either way the file name reaches the
+    // model, so it can ask about it rather than being unaware anything was shared.
     if (isImage(abs)) {
-      notes.push(`attached image ${shown} (I can't read images — describe it if you need me to know its contents)`);
-      blocks.push(
-        `[The user shared an image file: ${shown}. Images can't be read by this model, so its ` +
-          `contents aren't available to you — ask them to describe it if you need details.]`,
-      );
       if (c.kind === "path") collapses.push({ start: c.start, end: c.end, label: basename(abs) });
+
+      if (!canSeeImages) {
+        notes.push(`attached image ${shown} (this model can't see images — describe it, or switch with /provider)`);
+        blocks.push(
+          `[The user shared an image file: ${shown}. The model you are running can't see images, so its ` +
+            `contents aren't available to you — ask them to describe it if you need details.]`,
+        );
+        continue;
+      }
+
+      const verdict = await describeImage(abs, stat.size);
+      if (isRejection(verdict)) {
+        notes.push(`skipped ${shown} (${verdict.reason})`);
+        blocks.push(`[The user tried to share ${shown}, but it couldn't be sent: ${verdict.reason}.]`);
+        continue;
+      }
+      images.push(verdict);
+      const size = verdict.width && verdict.height ? `${verdict.width}x${verdict.height}` : "attached";
+      notes.push(`attached image ${shown} (${size})`);
       continue;
     }
 
@@ -126,8 +149,8 @@ export async function resolveAttachments(text: string, cwd: string): Promise<Res
   }
 
   const displayText = applyCollapses(text, collapses);
-  if (blocks.length === 0) return { modelText: text, displayText, notes };
-  return { modelText: `${displayText}\n\n${blocks.join("\n\n")}`, displayText, notes };
+  if (blocks.length === 0) return { modelText: displayText, displayText, notes, images };
+  return { modelText: `${displayText}\n\n${blocks.join("\n\n")}`, displayText, notes, images };
 }
 
 /**

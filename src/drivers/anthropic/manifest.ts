@@ -102,6 +102,15 @@ const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
  * by the API. Rather than let that reach the wire, a no-thinking config steps its
  * effort down to `high` here.
  */
+/**
+ * Both models offered here read images. Anthropic accepts JPEG, PNG, GIF and WebP,
+ * and downscales anything oversized itself, so this driver takes what core sends and
+ * adds no resizing of its own.
+ */
+export function acceptsImages(_model: ModelId): boolean {
+  return true;
+}
+
 export function normalize(config: ModelConfig): ModelConfig {
   const model: ModelId = config.model === OPUS ? OPUS : SONNET;
   const thinking = config.thinking === true;
@@ -121,5 +130,6 @@ export const anthropicManifest: DriverManifest = {
   price,
   contextWindow,
   bufferedOutputTokens,
+  acceptsImages,
   normalize,
 };

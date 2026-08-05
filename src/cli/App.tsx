@@ -1305,11 +1305,19 @@ export function App() {
     // file path collapses to just its name — never the file dump. The model gets
     // the full content via resolved <attached_file> blocks, and each attachment
     // leaves one compact activity note (counts only).
-    const { modelText, displayText, notes } = await resolveAttachments(trimmed, s.cwd);
+    // Whether an attached image is sent or merely named depends on the running model,
+    // and that is a fact we ask the driver for — never a provider name in this file.
+    const manifest = manifestForModel(s.modelConfig.model);
+    const canSeeImages = manifest.acceptsImages?.(s.modelConfig.model) ?? false;
+    const { modelText, displayText, notes, images } = await resolveAttachments(trimmed, s.cwd, canSeeImages);
     dispatch({ type: "user", text: displayText });
     for (const n of notes) note(n);
     // Restore any collapsed pastes into the model's copy only (the chat keeps chips).
-    s.transcript.push({ role: "user", content: expandPastes(modelText) });
+    s.transcript.push({
+      role: "user",
+      content: expandPastes(modelText),
+      ...(images.length > 0 ? { images } : {}),
+    });
     await streamRespond(s);
   }
 

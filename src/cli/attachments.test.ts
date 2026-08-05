@@ -10,6 +10,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
 
+/** The smallest byte sequence that is a readable PNG header of a given size. */
+function png(width: number, height: number): Buffer {
+  const buf = Buffer.alloc(24);
+  buf.writeUInt32BE(0x89504e47, 0); // signature
+  buf.write("IHDR", 12, "ascii");
+  buf.writeUInt32BE(width, 16);
+  buf.writeUInt32BE(height, 20);
+  return buf;
+}
+
 async function withTmp(fn: (dir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "mindweave-attach-"));
   try {
@@ -101,15 +111,43 @@ test("non-image binary files are skipped with a note, not attached", async () =>
   });
 });
 
-test("images are recognized and acknowledged, but not sent (text model)", async () => {
+test("a model without vision: the image is NAMED but not attached", async () => {
   await withTmp(async (dir) => {
     await fs.writeFile(join(dir, "shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]));
-    const { modelText, displayText, notes } = await resolveAttachments(`look at @shot.png`, dir);
+    // Default is no vision — the common case, since not every provider ships it.
+    const { modelText, displayText, notes, images } = await resolveAttachments(`look at @shot.png`, dir);
+    assert.equal(images.length, 0, "nothing may be sent to a model that cannot see");
     assert.equal(notes.length, 1);
-    assert.match(notes[0]!, /attached image shot\.png \(I can't read images/);
-    assert.ok(modelText.includes("shared an image file: shot.png")); // model is told, no bytes
-    assert.ok(!modelText.includes("<attached_file")); // not a text attachment
+    assert.match(notes[0]!, /can't see images/);
+    assert.ok(modelText.includes("shared an image file: shot.png")); // told, without bytes
+    assert.ok(!modelText.includes("<attached_file")); // not a text attachment either
     assert.equal(displayText, "look at @shot.png");
+  });
+});
+
+test("a model with vision: the image becomes a ref carrying its real dimensions", async () => {
+  await withTmp(async (dir) => {
+    await fs.writeFile(join(dir, "shot.png"), png(1920, 1080));
+    const { notes, images } = await resolveAttachments(`look at @shot.png`, dir, true);
+
+    assert.equal(images.length, 1);
+    assert.equal(images[0]!.mediaType, "image/png");
+    assert.equal(images[0]!.width, 1920);
+    assert.equal(images[0]!.height, 1080);
+    // A ref, never bytes — the payload is loaded at request time.
+    assert.ok(!("data" in images[0]!));
+    assert.match(notes[0]!, /attached image shot\.png \(1920x1080\)/);
+  });
+});
+
+test("a format no provider takes is refused with a reason, even when vision is on", async () => {
+  await withTmp(async (dir) => {
+    await fs.writeFile(join(dir, "diagram.svg"), "<svg/>\n");
+    const { notes, images, modelText } = await resolveAttachments("@diagram.svg", dir, true);
+    assert.equal(images.length, 0);
+    assert.match(notes[0]!, /skipped diagram\.svg \(\.svg images can't be sent/);
+    // The model is still told it exists, so it can ask about it.
+    assert.ok(modelText.includes("diagram.svg"));
   });
 });
 

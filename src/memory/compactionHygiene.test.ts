@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { microcompact, isContinuation, KEEP_LAST_N_BOUNDARY } from "./compaction.js";
+import { microcompact, isContinuation, estimateEntriesTokens, KEEP_LAST_N_BOUNDARY } from "./compaction.js";
 import type { Entry } from "./types.js";
 
 const recap = (text: string): Entry => ({ role: "assistant", content: text });
@@ -93,4 +93,59 @@ test("isContinuation: trivial continuations vs genuine new tasks", () => {
   ]) {
     assert.equal(isContinuation(t), false, `"${t}" is a new task`);
   }
+});
+
+// ── image eviction ────────────────────────────────────────────────────────────
+// An attached image is the most expensive thing a turn can carry and the most
+// perfectly reconstructible, so it evicts on the same window as a tool-result body
+// and leaves the file name behind as the key to ask for it again.
+
+const shot = { path: "/tmp/proj/shot.png", mediaType: "image/png", width: 1920, height: 1080 };
+const withImage = (text: string): Entry => ({ role: "user", content: text, images: [shot] });
+
+test("an OLD image payload is dropped, leaving the file name as the restoration key", () => {
+  const entries: Entry[] = [withImage("look at this"), ...Array.from({ length: 8 }, (_, i) => userMsg(`turn ${i}`))];
+  const { entries: out, imagesCleared } = microcompact(entries, 2);
+
+  assert.equal(imagesCleared, 1);
+  const first = out[0] as Extract<Entry, { role: "user" }>;
+  assert.equal(first.images, undefined, "the payload must be gone from the wire");
+  assert.ok(first.content.startsWith("look at this"), "the person's own words are never touched");
+  assert.match(first.content, /shot\.png/, "the name stays — it is how the model asks for it again");
+  assert.match(first.content, /no longer in context/);
+});
+
+test("a RECENT image is kept — evicting the image the model is working from is the bug", () => {
+  const entries: Entry[] = [userMsg("earlier"), withImage("fix what you see here")];
+  const { entries: out, imagesCleared } = microcompact(entries, 8);
+
+  assert.equal(imagesCleared, 0);
+  assert.deepEqual((out[1] as Extract<Entry, { role: "user" }>).images, [shot]);
+});
+
+test("image eviction is idempotent — a second pass neither re-clears nor re-annotates", () => {
+  const entries: Entry[] = [withImage("look"), ...Array.from({ length: 8 }, (_, i) => userMsg(`turn ${i}`))];
+  const once = microcompact(entries, 2);
+  const twice = microcompact(once.entries, 2);
+
+  assert.equal(twice.imagesCleared, 0);
+  assert.deepEqual(twice.entries, once.entries, "a stable transcript must stay byte-identical");
+});
+
+test("an attached image is COUNTED, not treated as a few characters of path", () => {
+  // The failure this guards is silent and expensive: a screenshot is ~40 characters of
+  // text and thousands of tokens of context. Counted by its text alone, every
+  // compaction bar fires late by exactly the amount that matters most.
+  const bare = estimateEntriesTokens([userMsg("look at this")]);
+  const withShot = estimateEntriesTokens([withImage("look at this")]);
+
+  assert.ok(withShot - bare > 2000, `a 1080p screenshot must move the estimate (moved ${withShot - bare})`);
+});
+
+test("once the payload is evicted, so is its token cost", () => {
+  const entries: Entry[] = [withImage("look"), ...Array.from({ length: 8 }, (_, i) => userMsg(`turn ${i}`))];
+  const before = estimateEntriesTokens(entries);
+  const after = estimateEntriesTokens(microcompact(entries, 2).entries);
+
+  assert.ok(after < before - 2000, "eviction has to show up in the bars, or it bought nothing");
 });

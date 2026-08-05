@@ -23,6 +23,7 @@
  * system prompt is the same bytes here as on any other provider.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { basename } from "node:path";
 import type {
   ModelRequest,
   StreamEvent,
@@ -118,9 +119,18 @@ export function renderMessages(req: ModelRequest): {
     }
 
     if (msg.role === "user") {
-      if (msg.content.trim()) {
-        messages.push({ role: "user", content: [{ type: "text", text: msg.content }] });
+      // Images first: the model reads an image-then-text message more reliably than
+      // the reverse, and each one is labelled so a later turn can refer to it by name.
+      const blocks: Anthropic.ContentBlockParam[] = [];
+      for (const img of msg.images ?? []) {
+        blocks.push({ type: "text", text: `Image (${basename(img.path)}):` });
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: img.mediaType as "image/png", data: img.data },
+        });
       }
+      if (msg.content.trim()) blocks.push({ type: "text", text: msg.content });
+      if (blocks.length > 0) messages.push({ role: "user", content: blocks });
       continue;
     }
 

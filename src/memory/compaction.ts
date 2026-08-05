@@ -23,7 +23,9 @@
  * owns "when" and the summarizer call), so it stays trivially testable and could
  * run on either side of the future client/server line.
  */
+import { basename } from "node:path";
 import type { Entry } from "./types.js";
+import { estimateImagesTokens } from "./images.js";
 
 // ~3.5 chars/token, deliberately tokenizer-free: triggers need a cheap, stable,
 // slightly-conservative proxy, not an exact count (better to compact a touch
@@ -57,6 +59,10 @@ export const CLEARED_STUB =
  *  genuine recaps (long enough) are touched — short acknowledgements stay. */
 const RECAP_STUB = "[earlier status update condensed — this work is done; focus on the current task]";
 const RECAP_MIN_CHARS = 220;
+
+/** Left behind when an attached image's payload is evicted. Names the file, so asking
+ *  for it again is an ordinary request rather than a lost capability. */
+export const IMAGE_CLEARED_STUB = "was attached here but is no longer in context — ask me to re-attach it if you need to look again";
 
 /** Edit/write tools whose call INPUT carries bulky content (a whole file, a diff, a
  *  symbol body). Once such an edit is old and its result already cleared, the content
@@ -94,11 +100,19 @@ export function estimateTokens(text: string): number {
   return text ? Math.ceil(text.length / CHARS_PER_TOKEN) + 1 : 0;
 }
 
-/** Estimated token footprint of a transcript (content + tool-call arguments + small overhead). */
+/**
+ * Estimated token footprint of a transcript (content + tool-call arguments + attached
+ * images + small overhead).
+ *
+ * Images are counted by AREA, not by the length of their path. A screenshot is a few
+ * dozen characters of text and a few thousand tokens of context, so leaving it out
+ * would make every compaction bar fire late by exactly the amount that matters most.
+ */
 export function estimateEntriesTokens(entries: Entry[]): number {
   let total = 0;
   for (const e of entries) {
     total += estimateTokens(e.content) + 4;
+    if (e.role === "user" && e.images) total += estimateImagesTokens(e.images);
     if (e.role === "assistant" && e.toolCalls) {
       for (const tc of e.toolCalls) total += estimateTokens(tc.arguments) + estimateTokens(tc.name);
     }
@@ -132,7 +146,14 @@ export function estimateEntriesTokens(entries: Entry[]): number {
 export function microcompact(
   entries: Entry[],
   keepLastN: number = KEEP_LAST_N,
-): { entries: Entry[]; cleared: number; clearedIds: string[]; recapsCleared: number; inputsCleared: number } {
+): {
+  entries: Entry[];
+  cleared: number;
+  clearedIds: string[];
+  recapsCleared: number;
+  inputsCleared: number;
+  imagesCleared: number;
+} {
   const toolIdx = entries.flatMap((e, i) => (e.role === "tool" ? [i] : []));
   let clearable = new Set(keepLastN > 0 ? toolIdx.slice(0, -keepLastN) : toolIdx);
 
@@ -170,6 +191,7 @@ export function microcompact(
   let cleared = 0;
   let recapsCleared = 0;
   let inputsCleared = 0;
+  let imagesCleared = 0;
   const clearedIds: string[] = [];
   const out = entries.map((e, i) => {
     // 1) Old tool-result bodies → stub (with first line kept for navigation).
@@ -204,13 +226,26 @@ export function microcompact(
       });
       return { ...e, toolCalls };
     }
+    // 4) Old image attachments → dropped, leaving a line that names the file.
+    //    An image is the most expensive thing a turn can carry (thousands of tokens
+    //    for a screenshot, re-sent on EVERY subsequent request) and also the most
+    //    perfectly reconstructible: the file is still on disk. So it evicts on the
+    //    same window as a tool-result body, and the note it leaves is the path,
+    //    which is exactly the restoration key the rule above asks for. The user's
+    //    own words are untouched — only the payload goes.
+    if (i < recapBoundary && e.role === "user" && e.images && e.images.length > 0) {
+      imagesCleared += e.images.length;
+      const names = e.images.map((img) => basename(img.path)).join(", ");
+      const { images: _dropped, ...rest } = e;
+      return { ...rest, content: `${e.content}\n\n[${names} ${IMAGE_CLEARED_STUB}]` };
+    }
     return e;
   });
 
-  if (cleared === 0 && recapsCleared === 0 && inputsCleared === 0) {
-    return { entries: [...entries], cleared: 0, clearedIds: [], recapsCleared: 0, inputsCleared: 0 };
+  if (cleared === 0 && recapsCleared === 0 && inputsCleared === 0 && imagesCleared === 0) {
+    return { entries: [...entries], cleared: 0, clearedIds: [], recapsCleared: 0, inputsCleared: 0, imagesCleared: 0 };
   }
-  return { entries: out, cleared, clearedIds, recapsCleared, inputsCleared };
+  return { entries: out, cleared, clearedIds, recapsCleared, inputsCleared, imagesCleared };
 }
 
 // Trivial continuations that do NOT open a new task — so a "continue"/"yes" after a

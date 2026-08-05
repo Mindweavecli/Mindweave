@@ -39,7 +39,16 @@ export interface ToolCallRecord {
  *                  model as a user message (see toChatMessages in the engine).
  */
 export type Entry =
-  | { role: "user"; content: string }
+  | {
+      role: "user";
+      content: string;
+      /** Images the person attached to this message, stored as REFERENCES (path +
+       *  media type), never bytes — see `memory/images.ts` for why. Loaded into the
+       *  request only while the payload is still live; microcompaction drops the
+       *  array once the turn is old, leaving `content` naming the file so the model
+       *  keeps the key to ask for it again. Absent on messages with no images. */
+      images?: import("./images.js").ImageRef[];
+    }
   | { role: "assistant"; content: string; toolCalls?: ToolCallRecord[] }
   | {
       role: "tool";
