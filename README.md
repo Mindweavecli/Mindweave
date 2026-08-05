@@ -58,27 +58,17 @@ If the numbers say the current architecture is worse, it changes. That has alrea
 
 Open a Discussion before writing code for anything core-shaped. We will talk it through, and where it makes sense we will test it properly and let the result decide. Being told no early is a better outcome than spending an afternoon on something that was never going to be merged, and this is written down precisely so that conversation can start honestly.
 
-## v1.7: it knows what it can still see
+## v1.8: it can look at what you show it
 
-A long session throws work away to stay sharp: old file contents get cleared out to make room. The agent was not told, so it went on answering from files it no longer had. This release makes what it believes about your code match what is actually there, and does the same for undo.
+Screenshots, mockups and error dialogs were the one thing you could not hand over. Dragging an image into the prompt got you an apology. On a model that can see, it now gets looked at.
 
-**A file it no longer has is read again.** Reading a file recorded that it had been read, and a later read was skipped as redundant. That record outlived the content: once the older part of a session was cleared, the file was gone but the note saying "you have this" remained, so the agent worked from a copy it could not see. Whether a file is present is now worked out from what is actually being sent, every turn, rather than remembered separately.
+**Attach an image the same way you attach a file.** Drag it into the prompt or write `@shot.png`, and a vision-capable model receives the image itself rather than a note saying one existed.
 
-**A partly-read file is no longer treated as fully read.** Reading a large file stops at a line limit and says so. That still counted as having read the whole thing, so a later read could be skipped for a file the agent had only seen the first part of.
+**On a text-only model it says so, plainly.** Not every provider offers vision. The file is still named, so the agent knows something was shared and can ask you about it, and the message tells you which models would be able to see it.
 
-**Compaction measures the whole prompt.** The point at which a session gets summarised was measured against the conversation alone, while the system prompt, every tool description, and the current contents of the files being worked on were all sent too and none of it counted. Sessions therefore ran fuller than intended. What gets measured is now what gets sent.
+**Images do not quietly drain your budget.** A screenshot costs thousands of tokens on every request it stays in, which on a long task adds up to more than the work around it. The image is dropped once the turn falls behind the recent window, leaving the file name so you can hand it back if it is needed again.
 
-**Undo will not overwrite work you did yourself.** If you edit a file after the agent touched it, `/undo` used to put its own version back over the top of yours, silently. It now compares what is on disk against what it wrote, leaves anything that has changed alone, and tells you which files it did not touch.
-
-**Undo survives a file it cannot write.** A file held open by an editor or a dev server used to take the whole rollback with it: the checkpoint was discarded before the writing was attempted, so a partial failure left no way to retry and reported success anyway. Failures are now kept for a second attempt, and reported.
-
-**Undo says what it did not cover, and tells the agent.** Anything a shell command changed is outside the net, and is now called out instead of being folded into "the turn was undone". The agent is also told when you roll something back, so it stops describing edits that are no longer on disk.
-
-**You can look at undo before using it.** `/undo list` shows which turns can be rolled back and what each one touched; `/undo 3` steps back that many.
-
-**Providers are picked separately from models.** `/provider` chooses who serves the project and shows which providers you have a key for; `/model` then offers that provider's models rather than every model from everyone. Choosing a provider you have no key for asks for one and changes nothing until you give it.
-
-**`/help` exists.** It lists every command, including the ones your project adds.
+**Any provider can add it.** A driver states whether its model accepts images and how to encode them; nothing else in the app needs to change, and a driver that ignores images keeps working exactly as before.
 
 **Next up:** more of the same. The core is being gone through subsystem by subsystem, looking for the things that only show up when you actually run it.
 
@@ -183,6 +173,7 @@ Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mc
 - [x] **v1.5: processes cleaned up properly, an Esc that actually cancels, per-model compaction**
 - [x] **v1.6: background apps report when they are up, and stay quiet when you close them**
 - [x] **v1.7: it re-reads what it can no longer see, undo that will not overwrite your work, providers chosen separately from models**
+- [x] **v1.8: images can be attached and looked at, on providers that support them**
 - [ ] **Core hardening**, the current focus: every subsystem the agent actually runs, gone through one at a time
 - [ ] More model drivers (OpenAI, Qwen, Ollama, …), community-built
 - [ ] Verified macOS / Linux support
