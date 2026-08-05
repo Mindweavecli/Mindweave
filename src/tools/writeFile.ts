@@ -103,6 +103,11 @@ export const writeFile: Tool = {
     // CRLF project into a mix of CRLF and LF files.
     const eol = existed ? await fileEol(filePath) : await dirEol(dirname(filePath));
 
+    // The exact bytes about to land on disk — checkpointing needs the same value we
+    // write, not the pre-EOL content, or /undo would read a mismatch and call it a
+    // conflict on a file nobody else touched.
+    const outgoing = applyEol(content, eol);
+
     // Snapshot for /undo: the file's current bytes if it existed, else null so undo
     // deletes what this write creates.
     if (ctx.checkpoints) {
@@ -114,12 +119,12 @@ export const writeFile: Tool = {
           original = null;
         }
       }
-      ctx.checkpoints.backup(filePath, original);
+      ctx.checkpoints.backup(filePath, original, outgoing);
     }
 
     try {
       await fs.mkdir(dirname(filePath), { recursive: true });
-      await fs.writeFile(filePath, applyEol(content, eol), "utf8");
+      await fs.writeFile(filePath, outgoing, "utf8");
     } catch (error) {
       return fail(`could not write ${rawPath}: ${errText(error)}`);
     }

@@ -15,7 +15,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { projectDir } from "../memory/store.js";
-import { allModels, ensureDriver, manifestForModel, normalizeConfig } from "../drivers/registry.js";
+import { allModels, allProviders, ensureDriver, manifestForModel, normalizeConfig } from "../drivers/registry.js";
 import type { Effort, ModelChoice, ModelConfig, ModelId, ThinkLevel } from "../drivers/types.js";
 
 export type { Effort, ModelChoice, ModelConfig, ModelId, ThinkLevel };
@@ -29,6 +29,45 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = normalizeConfig({
   thinking: false,
   effort: "high",
 });
+
+/**
+ * The provider serving a model. The active provider is always DERIVED from the
+ * current model rather than stored beside it: a second copy of the same fact is a
+ * second thing to keep in sync, and the two disagreeing is the bug nobody notices.
+ */
+export function providerOf(model: ModelId): { id: string; label: string } {
+  const { id, label } = manifestForModel(model);
+  return { id, label };
+}
+
+/**
+ * The models `/model` offers: those of the provider currently in use, not every
+ * model everywhere. Picking a provider is `/provider`'s job.
+ */
+export function modelsOf(model: ModelId): ModelChoice[] {
+  return manifestForModel(model).models;
+}
+
+/**
+ * A model we can actually run, when the configured one's provider has no key.
+ *
+ * A saved config outlives the key that made it usable — a key can be removed, or
+ * (as happened) written by a version that persisted a provider switch before
+ * checking. Without a way back, the project reopens straight into the key prompt on
+ * every launch and there is nothing the user can do from inside the app. Returns
+ * null when the current provider is fine, or when no installed provider has a key
+ * (genuine first run — the prompt is then the right answer).
+ *
+ * `hasKey` is injected so this stays pure and testable.
+ */
+export function usableFallback(model: ModelId, hasKey: (envVar: string) => boolean): ModelId | null {
+  if (hasKey(manifestForModel(model).apiKeyEnv)) return null;
+  for (const provider of allProviders()) {
+    const first = provider.models[0];
+    if (first && hasKey(provider.apiKeyEnv)) return first.id;
+  }
+  return null;
+}
 
 /** The reasoning levels offered by `/think` for a model. */
 export function thinkLevels(model: ModelId): ThinkLevel[] {

@@ -21,7 +21,7 @@ import type { Driver, DriverManifest, ModelChoice, ModelConfig, ModelId } from "
 import { deepseekManifest } from "./deepseek/manifest.js";
 import { anthropicManifest } from "./anthropic/manifest.js";
 
-/** Every provider's cheap metadata, in `/model` display order. Always loaded. */
+/** Every provider's cheap metadata, in display order. Always loaded. */
 const MANIFESTS: DriverManifest[] = [deepseekManifest, anthropicManifest];
 
 /** How to load each provider's wire code, on demand. Keyed by manifest id. */
@@ -41,9 +41,19 @@ export function manifestForModel(model: ModelId): DriverManifest {
   return MANIFESTS.find((m) => m.models.some((c) => c.id === model)) ?? FALLBACK;
 }
 
-/** Every model offered across all installed providers — what `/model` lists. */
+/** Every model offered across all installed providers. */
 export function allModels(): ModelChoice[] {
   return MANIFESTS.flatMap((m) => m.models);
+}
+
+/**
+ * Every installed provider, in display order — what `/provider` lists.
+ *
+ * Manifests only: this stays synchronous and loads nobody's wire code, so the
+ * picker can show every provider without paying to import the ones you don't use.
+ */
+export function allProviders(): DriverManifest[] {
+  return [...MANIFESTS];
 }
 
 /**

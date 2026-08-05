@@ -276,6 +276,10 @@ export async function resumeSession(
   const extra = (meta.extraRoots ?? []).filter((r) => existsSync(r));
   const roots = [cwd, ...extra];
   const toolContext = freshToolContext(cwd, governance, roots);
+  // Undo history is in-memory, so a resumed session starts with none even though the
+  // earlier turns really did change files. Marking it lets /undo explain that rather
+  // than claim nothing has happened.
+  toolContext.checkpoints?.noteResumed();
   toolContext.sessionId = meta.id;
   attachMcp(toolContext, cwd);
   await seedProjectMemoryRead(toolContext, projectMemory);

@@ -28,10 +28,12 @@ import { appendForbidden, appendForbiddenCommand } from "../governor/write.js";
 import { addRoot, removeRoot } from "../tools/workspace.js";
 import { discoverRelatedRoots } from "../tools/workspaceDiscover.js";
 import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
-import { MODELS, DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, withModel, saveModelConfig } from "../dynamo/model.js";
-import { manifestForModel } from "../drivers/registry.js";
+import { parseUndoArg, undoNotice } from "../tools/checkpoints.js";
+import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOf, providerOf, usableFallback, withModel, saveModelConfig } from "../dynamo/model.js";
+import { allProviders, manifestForModel } from "../drivers/registry.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
 import { completePath } from "./pathComplete.js";
+import { formatHelp } from "./help.js";
 import { hasApiKey, saveApiKey, globalEnvPath } from "./bootstrap.js";
 import { versionLabel } from "./version.js";
 import { PromptInput } from "./components/PromptInput.js";
@@ -51,8 +53,19 @@ import { DEFAULT_MODE, modeById, nextMode, type ModeId } from "./modes.js";
 
 const MINDWEAVE_DOCS_URL = "https://mindweave.dev";
 
-/** The provider whose key we're missing, and what to tell the user about it. */
-type KeyNeed = { envVar: string; label: string; keysUrl: string };
+/**
+ * The provider whose key we're missing, and what to tell the user about it.
+ *
+ * `pending` is the switch this key would unlock. Its presence is also what makes the
+ * prompt escapable: a first-run gate has nothing behind it, but a gate reached by
+ * choosing a provider does — the session you were already in.
+ */
+type KeyNeed = {
+  envVar: string;
+  label: string;
+  keysUrl: string;
+  pending?: { model: string; providerLabel: string };
+};
 
 /**
  * The key a model needs, or null if we already have it. Each provider declares
@@ -74,6 +87,7 @@ function missingKeyFor(model: string): KeyNeed | null {
 type Overlay =
   | { kind: "sessions"; items: SessionMeta[] }
   | { kind: "resumeMode"; meta: SessionMeta }
+  | { kind: "provider" }
   | { kind: "model" }
   | { kind: "think" }
   | { kind: "shells"; items: ShellInfo[] }
@@ -313,7 +327,21 @@ export function App() {
       setReady(true);
       // The project may have a model saved from a different provider than the
       // default, so re-check against what we're actually about to run.
-      if (session.current) setKeyNeed(missingKeyFor(session.current.modelConfig.model));
+      const cur = session.current;
+      if (!cur) return;
+      const need = missingKeyFor(cur.modelConfig.model);
+      if (!need) return;
+      // A saved config can outlive the key that made it usable. Rather than open
+      // straight into an inescapable prompt, fall back to a provider we can actually
+      // run and say so — the user can always pick again with /provider.
+      const fallback = usableFallback(cur.modelConfig.model, hasApiKey);
+      if (fallback) {
+        void switchTo(fallback, providerOf(fallback).label).then(() =>
+          note(`no ${need.label} key yet — using ${providerOf(fallback).label} instead. /provider to change.`),
+        );
+        return;
+      }
+      setKeyNeed(need);
     });
   }, []);
 
@@ -344,9 +372,26 @@ export function App() {
     if (!keyNeed) return;
     saveApiKey(keyNeed.envVar, key);
     setKeyInput("");
+    const pending = keyNeed.pending;
     setKeyNeed(null);
-    note("key saved on this machine — you're all set. ask me anything.");
+    // The switch was held back until the key existed — complete it now.
+    if (pending) void switchTo(pending.model, pending.providerLabel);
+    else note("key saved on this machine — you're all set. ask me anything.");
   }
+
+  // Esc out of a key prompt we arrived at by CHOOSING a provider: nothing was changed
+  // or saved, so abandoning it simply leaves the session as it was. The first-run gate
+  // stays blocking — there is no session behind it to return to.
+  useInput(
+    (_input, key) => {
+      if (!key.escape) return;
+      setKeyInput("");
+      setKeyNeed(null);
+      const s = session.current;
+      if (s) note(`stayed on ${providerOf(s.modelConfig.model).label} · ${modelLabel(s.modelConfig.model)}`);
+    },
+    { isActive: keyNeed?.pending !== undefined },
+  );
 
   // Start/stop a turn's timer (drives the persistent status line).
   function startTurn() {
@@ -738,13 +783,52 @@ export function App() {
   // the choice for this project, and confirm.
   async function applyModel(index: number) {
     const s = session.current;
-    const choice = MODELS[index];
+    // Index into the SAME list the picker rendered — the current provider's models,
+    // not every model everywhere. Indexing the global list here would silently select
+    // a different model than the one on screen, and would type-check perfectly.
+    const choice = s ? modelsOf(s.modelConfig.model)[index] : undefined;
     if (!s || !choice) return;
     s.modelConfig = withModel(s.modelConfig, choice.id);
     await saveModelConfig(s.cwd, s.modelConfig);
     note(`model → ${modelLabel(s.modelConfig.model)} · ${thinkLabel(s.modelConfig)}`);
-    // Switching provider can mean we now need a key we've never been given.
-    setKeyNeed(missingKeyFor(s.modelConfig.model));
+  }
+
+  /**
+   * Apply a /provider pick: move to that provider's first model, since a provider is
+   * only reachable through one of its models. Staying put when the pick is the
+   * provider already in use matters — otherwise re-selecting it would quietly reset a
+   * model the user chose deliberately.
+   */
+  async function applyProvider(index: number) {
+    const s = session.current;
+    const provider = allProviders()[index];
+    if (!s || !provider) return;
+    if (providerOf(s.modelConfig.model).id === provider.id) {
+      note(`already on ${provider.label} · ${modelLabel(s.modelConfig.model)}`);
+      return;
+    }
+    const target = provider.models[0];
+    if (!target) return;
+
+    // Do NOT move onto — let alone SAVE — a provider we can't run. Persisting first is
+    // what turned a wrong pick into a project that reopened straight into the key
+    // prompt on every launch, with no way back from inside the app. Ask for the key,
+    // and apply the switch only once it exists.
+    const need = missingKeyFor(target.id);
+    if (need) {
+      setKeyNeed({ ...need, pending: { model: target.id, providerLabel: provider.label } });
+      return;
+    }
+    await switchTo(target.id, provider.label);
+  }
+
+  /** Move to a model and persist it. Only ever called once its key is known to exist. */
+  async function switchTo(model: string, providerLabel: string) {
+    const s = session.current;
+    if (!s) return;
+    s.modelConfig = withModel(s.modelConfig, model);
+    await saveModelConfig(s.cwd, s.modelConfig);
+    note(`provider → ${providerLabel} · model → ${modelLabel(s.modelConfig.model)} · ${thinkLabel(s.modelConfig)}`);
   }
 
   // Apply a /think pick for the current model: set thinking + effort, persist, confirm.
@@ -769,6 +853,7 @@ export function App() {
     }
     setOverlay(null);
     if (o.kind === "resumeMode") void applyResume(o.meta, index);
+    else if (o.kind === "provider") void applyProvider(index);
     else if (o.kind === "model") void applyModel(index);
     else if (o.kind === "think") void applyThink(index);
     else if (o.kind === "shells") {
@@ -805,6 +890,30 @@ export function App() {
     const name = firstTok.toLowerCase();
     const arg = raw.trim().slice(firstTok.length).trim(); // anything after the command word
 
+    // /help — every command, rendered from the same list the input's autocomplete
+    // offers, so the two can never disagree about what exists.
+    if (name === "/help") {
+      const skills = s.governance.skills ?? [];
+      const mcpPrompts = s.toolContext.mcp?.promptCatalog() ?? [];
+      say(
+        formatHelp([
+          { title: "Commands", commands: BASE_COMMANDS },
+          {
+            title: "Project skills",
+            commands: skills.map((k) => ({ name: `/${k.name}`, description: k.description || "project skill" })),
+          },
+          {
+            title: "MCP prompts",
+            commands: mcpPrompts.map((p) => ({
+              name: promptCommand(p),
+              description: p.description || `prompt from ${p.server}`,
+            })),
+          },
+        ]),
+      );
+      return;
+    }
+
     if (name === "/compact") {
       startTurn();
       note("compacting the conversation…");
@@ -827,25 +936,83 @@ export function App() {
       return;
     }
 
-    // /undo — roll back the file changes from the most recent turn.
+    // /undo — roll back file changes. Bare undoes the last turn; `list` shows what's
+    // available; a number goes back that many turns, newest first.
     if (name === "/undo") {
       const cp = s.toolContext.checkpoints;
-      if (!cp || !cp.hasUndo()) {
-        say("Nothing to undo — no file changes have been made yet this session.");
+      const command = parseUndoArg(arg);
+      if (command.kind === "error") {
+        say(command.message);
         return;
       }
-      const label = cp.nextUndoLabel();
-      const result = await cp.undo();
-      if (!result || result.restored.length === 0) {
+      if (!cp || !cp.hasUndo()) {
+        // A resumed session genuinely has no history to undo, which is NOT the same
+        // as nothing having happened — say which.
+        say(
+          cp?.wasResumed()
+            ? "Nothing to undo here — undo history isn't carried across restarts. Changes from the earlier run are still on disk."
+            : "Nothing to undo — no file changes have been made yet this session.",
+        );
+        return;
+      }
+
+      if (command.kind === "list") {
+        const rows = cp.list().map((c, i) => {
+          const bits = [`${c.files} file${c.files === 1 ? "" : "s"}`];
+          if (c.skipped > 0) bits.push(`${c.skipped} too large`);
+          if (c.ranShell) bits.push("ran shell");
+          return `  ${i + 1}. ${c.label} — ${bits.join(", ")} · ${timeAgo(c.at)}`;
+        });
+        note(`${rows.length} turn${rows.length === 1 ? "" : "s"} you can roll back (newest first):`);
+        say(`${rows.join("\n")}\n\n  /undo ${rows.length > 1 ? "2" : "1"} rolls back that many, newest first.`);
+        return;
+      }
+
+      const results = await cp.undoMany(command.count);
+      const rel = (p: string) => relativize(s.toolContext, p);
+      const uniq = (xs: string[]) => [...new Set(xs)];
+      const restored = uniq(results.flatMap((r) => r.restored));
+      const conflicts = uniq(results.flatMap((r) => r.conflicts));
+      const failed = uniq(results.flatMap((r) => r.failed));
+      const skipped = uniq(results.flatMap((r) => r.skipped));
+
+      if (restored.length + conflicts.length + failed.length + skipped.length === 0) {
         say("Nothing was rolled back.");
         return;
       }
-      // The files on disk are back to their pre-turn state; drop them from the read
-      // ledger so the model must re-read before it can edit them again.
-      for (const p of result.restored) s.toolContext.reads.delete(p);
-      const shown = result.restored.map((p) => relativize(s.toolContext, p));
-      note(`reverted ${shown.length} file${shown.length === 1 ? "" : "s"} from “${label}”:`);
-      say(shown.map((p) => `  ↩ ${p}`).join("\n"));
+
+      if (restored.length > 0) {
+        // The files on disk are back to their pre-turn state; drop them from the read
+        // ledger so the model must re-read before it can edit them again.
+        for (const p of restored) s.toolContext.reads.delete(p);
+        const from = results.length === 1 ? `“${results[0]!.label}”` : `${results.length} turns`;
+        note(`reverted ${restored.length} file${restored.length === 1 ? "" : "s"} from ${from}:`);
+        say(restored.map((p) => `  ↩ ${rel(p)}`).join("\n"));
+      }
+      if (conflicts.length > 0) {
+        // Changed since we wrote them. Rolling back would have destroyed that work.
+        note(`left alone — changed since I wrote ${conflicts.length === 1 ? "it" : "them"}:`);
+        say(conflicts.map((p) => `  • ${rel(p)}`).join("\n"));
+      }
+      if (failed.length > 0) {
+        const retry = results.some((r) => r.retryable)
+          ? " — /undo again to retry"
+          : " — giving up; they're still in their edited state";
+        note(`couldn't write ${failed.length === 1 ? "this file" : "these files"}${retry}:`);
+        say(failed.map((p) => `  ! ${rel(p)}`).join("\n"));
+      }
+      if (skipped.length > 0) {
+        note(`never checkpointed (too large) — still in their edited state:`);
+        say(skipped.map((p) => `  · ${rel(p)}`).join("\n"));
+      }
+      if (results.some((r) => r.ranShell)) {
+        say("Shell commands also ran — those changes aren't covered by /undo.");
+      }
+
+      // Tell the MODEL too. Without this the transcript still claims the edits are in
+      // place, and the next turn reasons about code that is no longer on disk.
+      s.transcript.push({ role: "user", content: undoNotice(results, rel) });
+      await saveSession(s);
       return;
     }
 
@@ -887,6 +1054,11 @@ export function App() {
         return;
       }
       setOverlay({ kind: "sessions", items: sessions });
+      return;
+    }
+
+    if (name === "/provider") {
+      setOverlay({ kind: "provider" });
       return;
     }
 
@@ -1150,7 +1322,11 @@ export function App() {
           <Text bold color="yellow">Mindweave</Text>
           <Text dimColor>{versionLabel()}</Text>
         </Box>
-        <Text>Welcome to Mindweave — your terminal coding agent. Let's set you up, one time only.</Text>
+        <Text>
+          {keyNeed.pending
+            ? `${keyNeed.label} needs a key before it can answer. Nothing has changed yet.`
+            : "Welcome to Mindweave — your terminal coding agent. Let's set you up, one time only."}
+        </Text>
         <Box marginTop={1}>
           <Text>Paste your {keyNeed.label} API key to start chatting:</Text>
         </Box>
@@ -1167,6 +1343,7 @@ export function App() {
         <Box marginTop={1} flexDirection="column">
           <Text dimColor>Don't have one? Get a key at {keyNeed.keysUrl}</Text>
           <Text dimColor>Learn more: {MINDWEAVE_DOCS_URL}</Text>
+          {keyNeed.pending ? <Text dimColor>Esc — stay where you are and change nothing.</Text> : null}
         </Box>
         <Box marginTop={1}>
           <Text dimColor>
@@ -1242,15 +1419,39 @@ export function App() {
       }));
       return <Picker title="MCP servers" items={items} width={width} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />;
     }
-    if (overlay.kind === "model") {
-      const id = cur?.modelConfig.model;
-      const items = MODELS.map((m) => ({ label: m.label + (m.id === id ? "  ✓" : ""), description: m.description }));
+    if (overlay.kind === "provider") {
+      const active = providerOf(cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model).id;
+      const providers = allProviders();
+      const items = providers.map((p) => {
+        const n = p.models.length;
+        const models = `${n} model${n === 1 ? "" : "s"}`;
+        // Say up front which ones you can actually run — finding out at the next
+        // request is the worse place to learn it.
+        const key = hasApiKey(p.apiKeyEnv) ? "key set" : `needs ${p.apiKeyEnv}`;
+        return { label: p.label + (p.id === active ? "  ✓" : ""), description: `${models} · ${key}` };
+      });
       return (
         <Picker
-          title="Choose a model"
+          title="Choose a provider"
           items={items}
           width={width}
-          initialIndex={Math.max(0, MODELS.findIndex((m) => m.id === id))}
+          initialIndex={Math.max(0, providers.findIndex((p) => p.id === active))}
+          onSelect={onOverlaySelect}
+          onCancel={onOverlayCancel}
+        />
+      );
+    }
+    if (overlay.kind === "model") {
+      const id = cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model;
+      // Only the current provider's models. Switching provider is /provider's job.
+      const models = modelsOf(id);
+      const items = models.map((m) => ({ label: m.label + (m.id === id ? "  ✓" : ""), description: m.description }));
+      return (
+        <Picker
+          title={`Choose a ${providerOf(id).label} model`}
+          items={items}
+          width={width}
+          initialIndex={Math.max(0, models.findIndex((m) => m.id === id))}
           onSelect={onOverlaySelect}
           onCancel={onOverlayCancel}
         />
@@ -1388,7 +1589,9 @@ function useTerminalWidth(): number {
 // The built-in slash commands offered by the input's autocomplete. Project skills
 // are appended at render time from the live session.
 const BASE_COMMANDS = [
-  { name: "/model", description: "choose which model answers" },
+  { name: "/help", description: "show this list" },
+  { name: "/provider", description: "choose which provider serves this project" },
+  { name: "/model", description: "choose which model answers, from the current provider" },
   { name: "/think", description: "set the reasoning level for the model" },
   { name: "/rules", description: "list rules, or add one: /rules <directive>" },
   { name: "/skills", description: "list skills, or make one: /skills <description>" },
@@ -1400,7 +1603,7 @@ const BASE_COMMANDS = [
   { name: "/shells", description: "view or stop background commands (tests, servers)" },
   { name: "/mcp", description: "view MCP servers; /mcp add <name> <command|url> to connect one" },
   { name: "/context", description: "show what Mindweave sees about this project" },
-  { name: "/undo", description: "roll back the file changes from the last turn" },
+  { name: "/undo", description: "roll back file changes: /undo, /undo list, /undo <n>" },
   { name: "/compact", description: "summarize the conversation to free up context" },
   { name: "/continue", description: "pick a past session to resume" },
 ];

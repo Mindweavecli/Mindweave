@@ -138,7 +138,7 @@ export const multiEdit: Tool = {
 
     const updated = applyEol(seq.updated, eol);
     // Snapshot the pre-edit bytes for /undo before touching disk.
-    ctx.checkpoints?.backup(filePath, content);
+    ctx.checkpoints?.backup(filePath, content, updated);
     try {
       await fs.writeFile(filePath, updated, "utf8");
     } catch (error) {

@@ -6,14 +6,102 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
+import { mkdtempSync } from "node:fs";
+
+// Point the home dir at a throwaway folder BEFORE importing the module, because
+// saved model configs live under `projectDir()` → `homedir()`. Without this the
+// persistence tests write into the REAL ~/.mindweave/projects and leave a directory
+// behind on every run — 79 of them had accumulated in one user's home before anyone
+// noticed. A test that dirties the machine it runs on is a bug in the test.
+const FAKE_HOME = mkdtempSync(join(tmpdir(), "mindweave-model-home-"));
+process.env.USERPROFILE = FAKE_HOME;
+process.env.HOME = FAKE_HOME;
+
+const {
   DEFAULT_MODEL_CONFIG,
+  MODELS,
   loadModelConfig,
+  modelsOf,
+  providerOf,
   saveModelConfig,
   thinkLabel,
   thinkLevels,
+  usableFallback,
   withModel,
-} from "./model.js";
+} = await import("./model.js");
+const { allProviders } = await import("../drivers/registry.js");
+
+// ── falling back to a provider we can actually run ────────────────────────────
+const KEYED = (envVar: string) => envVar === allProviders()[0]!.apiKeyEnv;
+
+test("no fallback is offered while the current provider's key is present", () => {
+  const current = allProviders()[0]!.models[0]!.id;
+  assert.equal(usableFallback(current, KEYED), null);
+});
+
+test("a keyless provider falls back to one that has a key", () => {
+  const keyless = allProviders().find((p) => p.apiKeyEnv !== allProviders()[0]!.apiKeyEnv);
+  if (!keyless) return; // only one provider installed — nothing to fall back from
+  const landed = usableFallback(keyless.models[0]!.id, KEYED);
+  assert.ok(landed, "a usable provider exists and should have been offered");
+  assert.equal(providerOf(landed!).id, allProviders()[0]!.id);
+});
+
+test("with no keys at all there is no fallback — the prompt is the right answer", () => {
+  // Genuine first run: falling back to another keyless provider would just move the
+  // problem, so the setup gate should stay.
+  assert.equal(usableFallback(MODELS[0]!.id, () => false), null);
+});
+
+// ── provider scoping (what /provider and /model each list) ────────────────────
+test("every model is offered by its own provider's list", () => {
+  // If this breaks, /model stops showing the model you are currently on.
+  for (const m of MODELS) {
+    assert.ok(
+      modelsOf(m.id).some((c) => c.id === m.id),
+      `${m.id} is missing from its own provider's model list`,
+    );
+  }
+});
+
+test("a provider's list contains only that provider's models", () => {
+  for (const m of MODELS) {
+    const owner = providerOf(m.id).id;
+    for (const sibling of modelsOf(m.id)) {
+      assert.equal(providerOf(sibling.id).id, owner, `${sibling.id} leaked into ${owner}'s list`);
+    }
+  }
+});
+
+test("every provider serves at least one model", () => {
+  // /provider switches by landing on `models[0]`, so a provider with none would be
+  // selectable and then silently do nothing.
+  for (const p of allProviders()) {
+    assert.ok(p.models.length > 0, `${p.id} offers no models`);
+  }
+});
+
+test("landing on a provider's first model actually puts you on that provider", () => {
+  // The round trip /provider depends on: pick a provider → switch to its first model
+  // → the derived provider is the one you picked.
+  for (const p of allProviders()) {
+    const landed = withModel(DEFAULT_MODEL_CONFIG, p.models[0]!.id);
+    assert.equal(providerOf(landed.model).id, p.id);
+  }
+});
+
+test("switching provider clamps reasoning to what the new one accepts", () => {
+  // A level the target does not offer must be stepped down, not sent and rejected —
+  // the shared Effort type is the union of every provider's ladder, not a permission.
+  for (const p of allProviders()) {
+    const landed = withModel({ ...DEFAULT_MODEL_CONFIG, thinking: true, effort: "max" }, p.models[0]!.id);
+    const offered = thinkLevels(landed.model);
+    assert.ok(
+      offered.some((l) => l.thinking === landed.thinking && (!l.thinking || l.effort === landed.effort)),
+      `${p.id} landed on a reasoning level it does not offer: ${landed.effort}`,
+    );
+  }
+});
 
 test("Flash offers 2 reasoning levels, Pro offers 3", () => {
   assert.equal(thinkLevels("deepseek-v4-flash").length, 2);

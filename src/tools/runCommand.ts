@@ -119,6 +119,11 @@ export const runCommand: Tool = {
     const command = typeof args.command === "string" ? args.command.trim() : "";
     if (!command) return fail("`command` is required.");
 
+    // A shell can change files in ways the checkpoint net never sees (a formatter, a
+    // codegen step, a `git checkout`). Flag the turn so /undo says what it did NOT
+    // cover instead of implying the whole turn was rolled back.
+    ctx.checkpoints?.noteShell();
+
     const blocked = catastrophicCommandReason(command);
     if (blocked) {
       return fail(`Refusing to run this command: it looks like ${blocked}.`);
