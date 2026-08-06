@@ -14,66 +14,23 @@
 
 ## What is Mindweave?
 
-Mindweave is a coding agent that lives in your terminal and works directly inside your repository, reading, searching, editing, running commands, and verifying its own work. It runs **entirely on your machine**: your code and your API key never touch a MindWeave server.
+Mindweave is a coding agent that lives in your terminal and works inside your repository: reading, searching, editing, running commands, and checking its own work. It runs **entirely on your machine**. Your code and your API key never touch a Mindweave server.
 
-It's built lean on purpose. Instead of burning your context budget on heavy scaffolding, MindWeave keeps prompts thin and leaves the model room to actually reason about your code.
+It is built lean on purpose. Most of a coding agent's context budget goes on scaffolding the model never needed. Mindweave keeps prompts thin and leaves the room for the model to actually reason about your code.
 
-## The philosophy: a core that stays still
+Bring your own key. Pick your model. It does the work.
 
-This section is permanent. It is the clearest statement of how this project is run, and it is here so nobody has to guess before they open an issue or write a line of code.
+How the project is run, what gets into the core, and what does not: [PHILOSOPHY.md](PHILOSOPHY.md). It is short, and it is the honest version.
 
-**Mindweave is open to everyone for suggestions. The core is not open to everything.**
+## Coming up: Release 1
 
-Anyone can propose anything. Issues, discussions, pull requests, all welcome, and a good idea from a first-time contributor carries exactly as much weight as one from a maintainer. What differs is where the idea lands, because this project has two very different bars.
+Mindweave has been built in the open through the 1.x line, and it is close to the real thing.
 
-**Drivers are wide open.** Everything that makes one model family run at its best belongs in `/drivers/<provider>`: wire format, request shape, cache breakpoints, prices, context windows, parsing repairs. Models ship faster than anything else in this field, and the driver layer is designed to absorb that churn without the middle of the agent moving at all. If you want to change something, this is almost always where it should go, and the answer here is usually yes.
+The next milestone is the **official release: Mindweave 1**. That is when it lands on npm, installable in one command, with the version numbering reset to match. Release 1 is the first version meant for people who were not watching it get built.
 
-**The core is deliberately near-finished, and the bar to change it is high on purpose.** The agent loop, the tools, their safety gates, the system prompt, memory, and compaction are the parts every provider and every user depends on. They change when there is a reproduced bug, a demonstrated correctness gap, or a genuinely better architecture that has been measured against the current one. They do not change because something is fashionable, because another tool shipped it, or because it might be useful to somebody.
+**The new UI is fully designed and lands before then.** It was drawn from scratch rather than borrowed, because a terminal is not a small browser and pretending otherwise is why so many CLI tools feel busy. It is quieter than what ships today, it gets out of the way while the agent works, and it tells you what is happening without asking you to watch. That is all we are saying for now.
 
-This is the same shape that has kept other long-lived systems alive. The Linux kernel holds a hard line against breaking userspace, and has for decades, while drivers underneath churn constantly. The stability is not stagnation. It is what makes everything built on top of it safe to rely on. A tool that rewrites its foundations every time the field moves is a tool nobody can build a habit around.
-
-### What gets added
-
-One test, and it is not about whether an idea is clever:
-
-> Does this make the developer spend less, get better results, and work faster and more smoothly?
-
-If it does not clearly do at least one of those, with the others not made worse, the answer is no. That is not a lack of ambition. Every capability in the core is paid for by every user on every turn, forever, and most of the cost is invisible at the moment it is added.
-
-### Replacing beats adding
-
-**We are looking to replace, not to accumulate.** Every tool has a real price: its description and schema are sent to the model on every uncached turn, so a tool nobody uses still costs tokens on every request from everyone. It also costs something worse than tokens. A model choosing among a large set of tools chooses worse than one choosing among a small set, whatever the context window allows, so each addition slightly degrades every decision the agent makes about the tools that were already there.
-
-So the preferred shape of a good contribution is: this replaces that, and here is why the result is smaller, faster, or more correct. A proposal that adds a capability and removes nothing has to justify its permanent cost to everyone, not just its benefit to the person proposing it.
-
-### Got some core idea?
-
-Bring evidence, not preference. A better architecture is genuinely welcome and will be taken seriously, on these terms:
-
-- Show what is slow, wrong, or clumsy about the current design, with something reproducible.
-- Show that the alternative is actually better, measured against what exists now rather than against an idea of it.
-- Show what it costs: tokens, complexity, surface area, and what it means for every provider rather than the one you use.
-
-If the numbers say the current architecture is worse, it changes. That has already happened more than once in this project, and each time it was because someone measured rather than argued. What will not move it is "most tools do it this way" or "it would be nice to have".
-
-Open a Discussion before writing code for anything core-shaped. We will talk it through, and where it makes sense we will test it properly and let the result decide. Being told no early is a better outcome than spending an afternoon on something that was never going to be merged, and this is written down precisely so that conversation can start honestly.
-
-## v1.8: it can look at what you show it
-
-Screenshots, mockups and error dialogs were the one thing you could not hand over. Dragging an image into the prompt got you an apology. On a model that can see, it now gets looked at.
-
-**Attach an image the same way you attach a file.** Drag it into the prompt or write `@shot.png`, and a vision-capable model receives the image itself rather than a note saying one existed.
-
-**On a text-only model it says so, plainly.** Not every provider offers vision. The file is still named, so the agent knows something was shared and can ask you about it, and the message tells you which models would be able to see it.
-
-**Images do not quietly drain your budget.** A screenshot costs thousands of tokens on every request it stays in, which on a long task adds up to more than the work around it. The image is dropped once the turn falls behind the recent window, leaving the file name so you can hand it back if it is needed again.
-
-**Any provider can add it.** A driver states whether its model accepts images and how to encode them; nothing else in the app needs to change, and a driver that ignores images keeps working exactly as before.
-
-**Next up:** more of the same. The core is being gone through subsystem by subsystem, looking for the things that only show up when you actually run it.
-
-**UI:** Is being designed and close to being finished.
-
+Between here and there: no new features. Just real use, and fixing whatever that turns up.
 
 ## Features
 
@@ -83,6 +40,7 @@ Screenshots, mockups and error dialogs were the one thing you could not hand ove
 - **Real tools.** File read/edit, multi-file edits, ripgrep search, shell with background jobs, sub-agents, and diagnostics, with read-before-edit safety and an undo net.
 - **Session memory.** Long sessions stay sharp: automatic compaction plus a continuously-maintained state summary that survives it. The agent can also read its own earlier sessions in a project, so "what did we do last time" gets a real answer.
 - **MCP servers.** Connect external tool servers (GitHub, Postgres, your own) with `/mcp add` or just by asking. They start with your session, and their tools are treated as untrusted by default.
+- **Images.** Drag a screenshot into the prompt, or write `@shot.png`, and a model that can see gets the image itself. On a text-only model it says so plainly instead of pretending.
 - **Per-project governor.** Give a project standing rules, reusable skills, and forbidden paths/commands that the agent must respect.
 - **Interaction modes.** Lightning (auto), Architect (plan-only, read-only), cycled with `shift-tab`.
 
@@ -90,9 +48,9 @@ Screenshots, mockups and error dialogs were the one thing you could not hand ove
 
 - **Node.js 20+**
 - A model API key (see below)
-- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) for faster search. MindWeave falls back to a built-in walker if it's not installed.
+- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) for faster search. Mindweave falls back to a built-in walker if it's not installed.
 
-> **Platforms:** MindWeave is developed and tested primarily on **Windows**. It's built on cross-platform Node and should run on macOS and Linux. If you hit a platform issue there, please open an issue.
+> **Platforms:** Mindweave is developed and tested primarily on **Windows**. It's built on cross-platform Node and should run on macOS and Linux. If you hit a platform issue there, please open an issue.
 
 ## Install
 
@@ -113,7 +71,7 @@ cd your-project
 mindweave
 ```
 
-On first launch, MindWeave asks for your API key and saves it to `~/.mindweave/.env` so it works in every project. Then just type what you want done.
+On first launch, Mindweave asks for your API key and saves it to `~/.mindweave/.env` so it works in every project. Then just type what you want done.
 
 ### Your key
 
@@ -137,47 +95,23 @@ Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/driv
 
 ## Connecting MCP servers
 
-[MCP](https://modelcontextprotocol.io) servers give the agent tools MindWeave doesn't ship: issue trackers, databases, cloud APIs, internal services. Add one and it's available from that moment on, in every future session, with nothing to start by hand.
+[MCP](https://modelcontextprotocol.io) servers give the agent tools Mindweave does not ship: issue trackers, databases, cloud APIs, internal services.
 
 ```bash
-# a local server
 /mcp add github npx -y @modelcontextprotocol/server-github --env GITHUB_TOKEN=ghp_x
-
-# a remote one
-/mcp add --http internal https://tools.acme.dev/mcp --header 'Authorization: Bearer t'
-
-# available in every project, not just this one
-/mcp add --global notes npx -y some-notes-server
-
-# a server with its own flags: everything after -- goes to the server
-/mcp add mine my-server -- --port 9000 --verbose
-
-/mcp             # what's running, and reconnect anything that isn't
-/mcp remove x    # stop configuring it
 ```
 
-You can also just ask: *"add the github mcp server, my token's in GITHUB_TOKEN."* The agent writes the config and asks you to confirm before anything is saved.
-
-Servers are declared in `.mindweave/mcp.json` (this project) or `~/.mindweave/mcp.json` (everywhere), in the same format every other MCP client uses, so an existing config can be pasted straight in.
-
-**Two things worth knowing.** If a server's tool description changes between sessions, that tool is blocked until you approve it, because a changed description is the main way a trusted server turns hostile. And remote servers requiring OAuth aren't supported yet; they'll show as `needs-auth`.
+Or just ask for it in plain words and the agent writes the config. Full guide, including remote servers and how a changed tool description is handled: [docs/MCP.md](docs/MCP.md).
 
 ## Roadmap
 
-- [x] **v1.0: first public release**
-- [x] **v1.1: Anthropic (Claude) driver, providers loaded on demand, provider-aware setup, cut off replies caught**
-- [x] **v1.1.2: shared core made provider-neutral, with tests guarding it**
-- [x] **v1.2: reads its own past sessions, failure loops interrupt instead of stopping dead, every early stop explains itself**
-- [x] **v1.3: MCP / external tool servers, with rug-pull protection and a deferred tool pool**
-- [x] **v1.4: MCP hardening with resources and server prompts, and rebuilt editing tools**
-- [x] **v1.5: processes cleaned up properly, an Esc that actually cancels, per-model compaction**
-- [x] **v1.6: background apps report when they are up, and stay quiet when you close them**
-- [x] **v1.7: it re-reads what it can no longer see, undo that will not overwrite your work, providers chosen separately from models**
-- [x] **v1.8: images can be attached and looked at, on providers that support them**
-- [ ] **Core hardening**, the current focus: every subsystem the agent actually runs, gone through one at a time
-- [ ] More model drivers (OpenAI, Qwen, Ollama, …), community-built
-- [ ] Verified macOS / Linux support
-- [ ] OAuth for remote MCP servers, once the core is where it needs to be
+Shipped through the 1.x line: the Anthropic driver alongside DeepSeek, providers loaded on demand, sessions the agent can read back, MCP with rug-pull protection, rebuilt editing tools, per-model compaction, background jobs that report when they are up, undo that will not overwrite your own work, and images you can attach and have looked at.
+
+- [x] **v1.9: core hardening.** Every subsystem the agent actually runs, read fresh one at a time rather than trusted because it shipped. Feature freeze starts here.
+- [ ] **Release 1.** The new UI, npm, and the numbering reset.
+- [ ] More model drivers (OpenAI, Qwen, Ollama, and others), community-built.
+- [ ] Verified macOS and Linux support, community-owned.
+- [ ] OAuth for remote MCP servers.
 
 ## Found a bug?
 
@@ -193,9 +127,9 @@ Especially worth reporting:
 
 ## Contributing
 
-MindWeave is open source and contributions are welcome, especially **model drivers**. See the [Contributing Guide](CONTRIBUTING.md), and open an issue or a Discussion to claim a provider.
+Mindweave is open source and contributions are welcome, especially **model drivers**. See the [Contributing Guide](CONTRIBUTING.md), and open an issue or a Discussion to claim a provider.
 
-Small fixes and reproduced bugs with a failing test can go straight to a pull request. For anything larger, start a Discussion first. [The philosophy section above](#the-philosophy-a-core-that-stays-still) explains where the two bars sit and what evidence moves the core one, and the guide covers the mechanics.
+Small fixes and reproduced bugs with a failing test can go straight to a pull request. For anything larger, start a Discussion first. [PHILOSOPHY.md](PHILOSOPHY.md) explains where the two bars sit and what evidence moves the core one, and the guide covers the mechanics.
 
 ## License
 
