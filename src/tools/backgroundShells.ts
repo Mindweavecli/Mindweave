@@ -29,7 +29,7 @@ import type { ChildProcess } from "node:child_process";
 import { killTree, killTreeSync } from "./killTree.js";
 
 const MAX_BUFFER_CHARS = 5_000_000; // cap one shell's retained output (runaway server)
-const MAX_READ_CHARS = 30_000; // cap a single shell_output read
+export const MAX_READ_CHARS = 30_000; // cap a single shell_output read
 const TAIL_CHARS = 2_000; // how much trailing output rides on a completion note
 
 /**
@@ -189,6 +189,15 @@ export interface ShellInfo {
   stoppedBy?: StopActor;
   /** It survived the startup grace, so it is up rather than merely spawned. */
   ready: boolean;
+  /**
+   * The retained buffer overflowed and older output was dropped.
+   *
+   * Set when a chatty process pushes past MAX_BUFFER_CHARS. It was recorded and then
+   * never shown anywhere, which made the loss invisible: a reader gets the bytes that
+   * survived and no indication that anything is missing. Surfaced so an incomplete log
+   * reads as incomplete rather than as the whole story.
+   */
+  truncated?: boolean;
 }
 
 export interface AdoptOptions {
@@ -477,6 +486,7 @@ function view(e: Entry): ShellInfo {
     ready: e.ready,
     ...(e.signal ? { signal: e.signal } : {}),
     ...(e.stoppedBy ? { stoppedBy: e.stoppedBy } : {}),
+    ...(e.truncated ? { truncated: true } : {}),
   };
 }
 

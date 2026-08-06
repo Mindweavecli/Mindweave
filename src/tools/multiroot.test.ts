@@ -11,8 +11,8 @@ import { promises as fs } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { relativize, resolvePath, searchUnits, anchorOf } from "./paths.js";
-import { addRoot, removeRoot } from "./workspace.js";
+import { canonicalRoot, relativize, resolvePath, rootsOf, searchUnits, anchorOf } from "./paths.js";
+import { addDirectory, addRoot, linkWorkspace, removeRoot } from "./workspace.js";
 import { grepTool } from "./grep.js";
 import type { ToolContext } from "./types.js";
 
@@ -81,7 +81,10 @@ test("addRoot / removeRoot manage the live workspace", async () => {
     const c = ctx(a, [a]);
     const added = await addRoot(c, b);
     assert.equal(added.label, basename(b));
-    assert.deepEqual(c.roots, [a, b]);
+    // Roots are stored CANONICAL. These fixtures live in tmpdir(), which is behind a
+    // symlink on macOS, so asserting the literal input here would pass on Windows and
+    // fail there — the fixture would be dodging the very thing the code now does.
+    assert.deepEqual(c.roots, [a, await canonicalRoot(b)]);
 
     // Idempotent.
     assert.equal((await addRoot(c, b)).already, true);
@@ -92,6 +95,79 @@ test("addRoot / removeRoot manage the live workspace", async () => {
 
     // Can't remove the primary.
     assert.ok(removeRoot(c, basename(a)).error);
+  });
+});
+
+test("the same folder cannot be added twice under different spellings", async () => {
+  // MEASURED before the fix: `RealApi`, `realapi` and a junction pointing at RealApi
+  // became THREE roots with three labels. Every search then walked that tree three
+  // times and reported each hit three ways, and an edit recorded under one label left
+  // the freshness ledger for the others stale. `addRoot` was the one entry point that
+  // skipped the canonicalisation paths.ts says every root goes through.
+  await twoRoots(async (a, b) => {
+    const c = ctx(a, [a]);
+    const real = join(b, "RealApi");
+    await fs.mkdir(real);
+    assert.equal((await addRoot(c, real)).already, undefined, "first add is new");
+
+    // Same directory, different case. Windows and macOS both resolve this to one place.
+    const cased = join(b, "realapi");
+    const byCase = await addRoot(c, cased);
+    if ((await fs.realpath(cased).catch(() => "")) === (await fs.realpath(real))) {
+      assert.equal(byCase.already, true, "a case variant is the same folder");
+    }
+
+    // Same directory, reached through a link.
+    const link = join(b, "linkApi");
+    try {
+      await fs.symlink(real, link, "junction");
+    } catch {
+      assert.equal(rootsOf(c).length, 2);
+      return; // no privilege to create links here
+    }
+    assert.equal((await addRoot(c, link)).already, true, "a link to it is the same folder");
+    assert.equal(rootsOf(c).length, 2, "one primary + one real folder, however it was spelled");
+  });
+});
+
+// ── Consent: widening the workspace is not something to assume ─────────────────
+// Both tools guarded on `if (ctx.requestApproval)`, so the absence of a way to ask was
+// treated as permission. A sub-agent has no channel by design, which made that the
+// normal case rather than an edge one.
+
+test("a proactive add with no way to ask does not add", async () => {
+  await twoRoots(async (a, b) => {
+    const c = ctx(a, [a]); // no requestApproval
+    const r = await addDirectory.execute({ path: b, proactive: true }, c);
+    assert.deepEqual(c.roots, [a], "the workspace was widened without consent");
+    assert.match(r.output, /no way to ask/i);
+    assert.notEqual(r.isError, true, "it is a refusal to act, not a failure to retry");
+  });
+});
+
+test("an explicit add still works without a channel — consent was already given", async () => {
+  // The distinction the `proactive` flag exists to draw: the user asked for this one.
+  await twoRoots(async (a, b) => {
+    const c = ctx(a, [a]);
+    await addDirectory.execute({ path: b }, c);
+    assert.deepEqual(c.roots, [a, await canonicalRoot(b)]);
+  });
+});
+
+test("link_workspace with no way to ask adds nothing and reports what it found", async () => {
+  await twoRoots(async (a, b) => {
+    // A sibling project, so discovery has something to return.
+    await fs.mkdir(join(b, "sibling"));
+    await fs.writeFile(join(b, "sibling", "package.json"), "{}");
+    const primary = join(b, "app");
+    await fs.mkdir(primary);
+    await fs.writeFile(join(primary, "package.json"), "{}");
+
+    const c = ctx(primary, [primary]); // no requestApproval
+    const before = [...rootsOf(c)];
+    const r = await linkWorkspace.execute({}, c);
+    assert.deepEqual(c.roots, before, "a bulk add happened with nobody asked");
+    if (/related folder/i.test(r.output)) assert.match(r.output, /no way to ask/i);
   });
 });
 

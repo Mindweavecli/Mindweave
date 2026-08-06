@@ -15,7 +15,7 @@ import {
 } from "./backgroundShells.js";
 import type { ShellInfo } from "./backgroundShells.js";
 import { runCommand } from "./runCommand.js";
-import { shellOutput, listShells } from "./shellTools.js";
+import { shellOutput, listShells, killShell } from "./shellTools.js";
 import type { ToolContext } from "./types.js";
 
 const NODE = process.execPath;
@@ -572,4 +572,43 @@ test("a signalled shell never describes itself as 'exited null'", async () => {
   assert.doesNotMatch(listed.output, /exited null/, `got: ${listed.output}`);
   assert.match(listed.output, /stopped \(SIG/, `got: ${listed.output}`);
   mgr.dispose();
+});
+
+// ── the shell trio's claims, pinned ──────────────────────────────────────────
+
+test("a rolled buffer is REPORTED, not silently incomplete", async () => {
+  // entry.truncated was set on overflow and then read by nothing, so a log missing
+  // megabytes of output looked identical to a complete one. A real child writes past
+  // the cap, which is the only way to exercise the roll through the public surface.
+  const mgr = new BackgroundShells();
+  const child = spawn(NODE, ["-e", "process.stdout.write('x'.repeat(5200000))"], { detached: DETACH });
+  const info = mgr.adopt(child, { command: "noisy", cwd: process.cwd() });
+  await waitUntil(() => mgr.list()[0]!.status !== "running");
+
+  const shown = (await mgr.read(info.id))!;
+  assert.equal(shown.info.truncated, true, "the roll must be visible on the public view");
+  // …and it must reach the model, through the tool it actually calls.
+  const ctx = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const listed = await listShells.execute({}, ctx);
+  assert.match(listed.output, /this log is incomplete/i);
+  mgr.dispose();
+});
+
+test("kill_shell reports a non-running shell plainly, not as a failure", async () => {
+  const mgr = new BackgroundShells();
+  const ctx = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const r = await killShell.execute({ id: 999 }, ctx);
+  assert.match(r.output, /wasn't running/i);
+  assert.notEqual(r.isError, true, "nothing went wrong; there was simply nothing to stop");
+  assert.match(killShell.description, /not an error/i);
+  mgr.dispose();
+});
+
+test("list_shells' description names the two questions its output answers", () => {
+  assert.match(listShells.description, /IS IT UP/i);
+  assert.match(listShells.description, /WHY DID IT STOP/i);
+});
+
+test("shell_output's stated read cap is the real one", () => {
+  assert.match(shellOutput.description, /at most 30,000 characters/i);
 });

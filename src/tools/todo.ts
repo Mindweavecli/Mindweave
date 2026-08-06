@@ -26,7 +26,9 @@ export const todoWrite: Tool = {
     "Create and update your task list for the current job. Pass the COMPLETE list " +
     "every time (it replaces the previous one). Use it for any task of roughly 3+ " +
     "steps to track progress and show the user where things stand; skip it for " +
-    "trivial one-step work. Keep exactly one task 'in_progress' at a time, mark a " +
+    "trivial one-step work. The current list is put back in front of you every turn, " +
+    "so you never need to call this just to see it, and you never need to restate it " +
+    "in your reply. Keep exactly one task 'in_progress' at a time, mark a " +
     "task 'completed' the moment it's truly done (not before — not if tests fail or " +
     "work is partial), and drop tasks that no longer apply. When all tasks are " +
     "completed the list clears itself.",

@@ -127,6 +127,40 @@ test("substituteSkillArgs fills $ARGUMENTS / $1, else appends as context", () =>
   assert.equal(substituteSkillArgs("Plain body.", ""), "Plain body.");
 });
 
+test("a skill body keeps its shell and its dollar amounts", () => {
+  // A skill is a markdown playbook, so `awk '{print $1}'` and "$100" are ordinary
+  // content. `/\$(\d+)/` matched $100 as positional argument one hundred, found none,
+  // and substituted the empty string — so the steps the model was told to follow were
+  // quietly not the steps on disk, and with NO arguments every $n vanished.
+  const body = "awk '{print $1}' f.txt — budget $100, tier two $250.";
+  assert.equal(substituteSkillArgs(body, ""), body, "no arguments must not rewrite the body");
+  assert.match(substituteSkillArgs(body, "staging"), /budget \$100, tier two \$250\./);
+});
+
+test("an unfilled positional stays visible instead of being blanked", () => {
+  // Deleting it makes a skill that wanted an argument read as though it never did.
+  assert.equal(substituteSkillArgs("Deploy to $1.", ""), "Deploy to $1.");
+  assert.equal(substituteSkillArgs("Deploy $1 to $2.", "app"), "Deploy app to $2.");
+});
+
+test("a dollar amount is not mistaken for a placeholder the skill declared", () => {
+  // Distinct from the blanking bug above, and the reason `$1`-`$9` is the right range
+  // rather than `\d+`: `hasPlaceholder` decides whether arguments get APPENDED as
+  // context. A body whose only "$number" is a price was read as already parameterised,
+  // so a plain skill invoked with arguments silently dropped them.
+  const body = "Ask for approval above $500.";
+  assert.match(
+    substituteSkillArgs(body, "urgent"),
+    /Additional context from the user: urgent/,
+    "arguments vanished because a price looked like a placeholder",
+  );
+});
+
+test("a $1 inside the user's own arguments is not substituted again", () => {
+  // Two chained replaces meant the argument text was rescanned as if it were body.
+  assert.equal(substituteSkillArgs("Target: $ARGUMENTS.", "a $1 b"), "Target: a $1 b.");
+});
+
 test("forbidden: parse strips comments/blanks and leading ./ and trailing /", () => {
   const patterns = parseForbidden("# secrets\nsrc/legacy/\n\n./config/prod.json\n*.pem\n");
   assert.deepEqual(patterns, ["src/legacy", "config/prod.json", "*.pem"]);

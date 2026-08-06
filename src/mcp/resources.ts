@@ -142,9 +142,15 @@ export function renderResourceList(resources: readonly McpResource[], templates:
   if (templates.length > 0) {
     if (lines.length > 0) lines.push("");
     lines.push("Templates (fill in the {placeholders} to build a URI, then read it):");
-    for (const t of templates) {
+    // Capped for the same reason as the resources above, which this branch was missing:
+    // the length is chosen by a third party, and an uncapped external payload is the
+    // failure mode MCP has already produced here once.
+    for (const t of templates.slice(0, MAX_RESOURCES_LISTED)) {
       const bits = [t.name !== t.uriTemplate ? t.name : "", t.description].filter(Boolean).join(" — ");
       lines.push(`- [${t.server}] ${t.uriTemplate}${bits ? ` — ${bits}` : ""}`);
+    }
+    if (templates.length > MAX_RESOURCES_LISTED) {
+      lines.push(`  … and ${templates.length - MAX_RESOURCES_LISTED} more (narrow with the \`server\` argument).`);
     }
   }
   return lines.join("\n");

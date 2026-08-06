@@ -14,7 +14,7 @@ import { parseForbidden, parseForbiddenCommands } from "./forbidden.js";
 import type { Rule, SkillMeta } from "./types.js";
 
 /** A filesystem-safe slug from a human name/phrase (kebab, ≤50 chars). */
-function slugify(text: string): string {
+export function slugify(text: string): string {
   return (
     text
       .toLowerCase()
@@ -22,6 +22,19 @@ function slugify(text: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 50) || "rule"
   );
+}
+
+/**
+ * Flatten a value to a single line before it goes into frontmatter.
+ *
+ * These headers are a line-oriented `key: value` format, and every value here is
+ * model-supplied text. A newline inside one starts what the loader reads as a NEW
+ * key, so a rule whose name ended in "\nglobs: **" would come back scoped to
+ * everything, and a skill's description could rewrite its own `when_to_use`. The
+ * value is written, then read back and believed, so it has to stay one field.
+ */
+function oneLine(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
 }
 
 /** A short name derived from a rule's text (first few words) when none is given. */
@@ -46,12 +59,12 @@ export async function writeRule(
   await fs.mkdir(dir, { recursive: true });
   const file = join(dir, `${slugify(name)}.md`);
   const header =
-    `---\nname: ${name}\n` +
-    (description ? `description: ${description}\n` : "") +
+    `---\nname: ${oneLine(name)}\n` +
+    (description ? `description: ${oneLine(description)}\n` : "") +
     (globs.length > 0 ? `globs: ${globs.join(", ")}\n` : "") +
     `---\n`;
   await fs.writeFile(file, `${header}${body}\n`, "utf8");
-  return { name, description, body, ...(globs.length > 0 ? { globs } : {}) };
+  return { name: oneLine(name), description: oneLine(description), body, ...(globs.length > 0 ? { globs } : {}) };
 }
 
 /** Fields for creating a skill (everything but where it lives). */
@@ -75,21 +88,24 @@ export async function writeSkill(cwd: string, skill: NewSkill): Promise<SkillMet
   const dir = join(projectDir(cwd), "skills", name);
   await fs.mkdir(dir, { recursive: true });
 
+  const description = oneLine(skill.description);
+  const whenToUse = oneLine(skill.whenToUse ?? "");
+  const argumentHint = oneLine(skill.argumentHint ?? "");
   const header =
-    `---\nname: ${name}\n` +
-    (skill.description ? `description: ${skill.description}\n` : "") +
-    (skill.whenToUse ? `when_to_use: ${skill.whenToUse}\n` : "") +
-    (skill.argumentHint ? `argument-hint: ${skill.argumentHint}\n` : "") +
+    `---\nname: ${name}\n` + // already the slug: no newline can survive slugify
+    (description ? `description: ${description}\n` : "") +
+    (whenToUse ? `when_to_use: ${whenToUse}\n` : "") +
+    (argumentHint ? `argument-hint: ${argumentHint}\n` : "") +
     (skill.globs && skill.globs.length > 0 ? `globs: ${skill.globs.join(", ")}\n` : "") +
     `---\n`;
   await fs.writeFile(join(dir, "SKILL.md"), `${header}${skill.body}\n`, "utf8");
 
   return {
     name,
-    description: skill.description,
-    whenToUse: skill.whenToUse ?? "",
+    description,
+    whenToUse,
     dir,
-    ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+    ...(argumentHint ? { argumentHint } : {}),
     ...(skill.globs && skill.globs.length > 0 ? { globs: skill.globs } : {}),
   };
 }

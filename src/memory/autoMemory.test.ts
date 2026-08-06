@@ -3,8 +3,8 @@
  *
  * Pointed at a temp HOME so it never touches the real ~/.mindweave (same scheme as
  * memory.test.ts). Covers: writing a topic file + index pointer, loading the
- * index, update-not-duplicate on the same name, and the tool's ask-before-save
- * gate (save / decline / adjust) plus type validation.
+ * index, update-not-duplicate on the same name, and that the tool saves SILENTLY
+ * (there is no ask-before-save gate any more) plus type validation.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -76,6 +76,60 @@ test("saving the same name updates instead of duplicating", async () => {
 test("slugify produces a safe file stem", () => {
   assert.equal(slugify("User Role!"), "user-role");
   assert.equal(slugify("  "), "memory");
+  // Everything outside [a-z0-9] collapses, so a name cannot escape the memory dir.
+  assert.equal(slugify("../../etc/passwd"), "etc-passwd");
+});
+
+test("an index line that mentions another memory's file survives that memory's save", async () => {
+  // The old filter dropped any line CONTAINING "(file.md)". Index lines are prose the
+  // model writes about memories, so cross-references are ordinary content — and losing
+  // one silently removes a memory from the only listing that is always loaded.
+  const cwd = "/proj/mem-xref";
+  await saveMemory(cwd, input({ name: "user role", indexLine: "who they are" }));
+  await saveMemory(cwd, input({ name: "release process", indexLine: "supersedes (user-role.md) entirely" }));
+  // Re-saving the referenced memory must not delete the line that mentions it.
+  await saveMemory(cwd, input({ name: "user role", indexLine: "who they are, revised" }));
+
+  const index = await loadMemoryIndex(cwd);
+  assert.match(index, /\[release process\]\(release-process\.md\)/, "the cross-referencing entry was deleted");
+  assert.match(index, /who they are, revised/);
+  assert.equal(index.match(/\(user-role\.md\)/g)?.length, 2, "one pointer + one mention");
+});
+
+test("frontmatter values cannot be forged by a newline in the name", async () => {
+  // These are model-supplied strings going into a line-oriented format; a description
+  // ending in "\ntype: user" would otherwise re-file the memory as a different type.
+  const cwd = "/proj/mem-frontmatter";
+  const saved = await saveMemory(cwd, input({ name: "notes", description: "first\ntype: user\nx: y" }));
+  const raw = await fs.readFile(join(memoryDir(cwd), saved.file), "utf8");
+  const header = raw.split("---")[1] ?? "";
+  assert.equal(header.match(/^type:/gm)?.length, 1, "a second type: key was injected");
+  assert.match(header, /description: first type: user x: y/);
+
+  // The name field is the other way in, and it also reaches the MEMORY.md index line.
+  const viaName = await saveMemory(cwd, input({ name: "notes2\ndescription: forged" }));
+  const raw2 = await fs.readFile(join(memoryDir(cwd), viaName.file), "utf8");
+  const header2 = raw2.split("---")[1] ?? "";
+  assert.equal(header2.match(/^description:/gm)?.length, 1, "a second description: key was injected");
+  const index = await loadMemoryIndex(cwd);
+  assert.equal(index.split("\n").filter((l) => l.includes(viaName.file)).length, 1, "the index line broke in two");
+});
+
+test("overwriting a DIFFERENT memory is reported, not passed off as an update", async () => {
+  // Names slug and clip to 60 chars, so two distinct names can land on one file. That
+  // is the only destructive path, and "memory is non-destructive" is the stated reason
+  // the user is never asked before a save.
+  const cwd = "/proj/mem-collide";
+  const long = "a".repeat(60);
+  const first = await saveMemory(cwd, input({ name: `${long}-one` }));
+  const second = await saveMemory(cwd, input({ name: `${long}-two` }));
+  assert.equal(first.file, second.file, "fixture must actually collide");
+  assert.equal(second.replaced, `${long}-one`);
+
+  // And a genuine re-save of the same name is NOT reported as a replacement.
+  const again = await saveMemory(cwd, input({ name: `${long}-two` }));
+  assert.equal(again.replaced, undefined);
+  assert.equal(again.updated, true);
 });
 
 // ── the save_memory tool ────────────────────────────────────────────────────

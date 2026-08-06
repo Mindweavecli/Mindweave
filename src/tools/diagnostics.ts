@@ -14,19 +14,39 @@ import type { Tool, ToolContext, ToolResult } from "./types.js";
 import type { CodeDiagnostic } from "../alternator/chassis/types.js";
 import { chassisForPath } from "./chassisMux.js";
 import { relativize, resolvePath } from "./paths.js";
+import { selectActiveFiles } from "../memory/workingSet.js";
 
-const MAX_WORKING_SET = 3; // when no path given, check the few most-recent files
+/** When no path is given, check this many of the most-recently-touched files.
+ *  Exported so the number quoted in the description is pinned to the real value. */
+export const MAX_WORKING_SET = 3;
 const MAX_SHOWN = 50;
 
 export const diagnosticsTool: Tool = {
   name: "diagnostics",
   readOnly: true,
+  // Written against the failure this tool is supposed to PREVENT: the model edits,
+  // asks for diagnostics, is told "no diagnostics", and moves on with broken code.
+  // Three things made that possible and none of them were in the text — the check is
+  // per-file so a broken CALLER is never seen, a clean answer is not proof (no server,
+  // a slow server, and an unreadable path all render identically), and the no-path
+  // form only reaches a few files.
   description:
-    "Report compiler/linter diagnostics (type errors, syntax errors, warnings) for a " +
-    "file from its language server. Call it after editing code to catch problems you " +
-    "just introduced and fix them before moving on. Give a `path`, or omit it to check " +
-    "the files you edited most recently. Returns nothing when there's no language " +
-    "server for the file or no problems are found.",
+    "Report compiler and linter diagnostics (type errors, syntax errors, warnings) for " +
+    "a file, from its language server. It re-syncs the file from disk first, so it " +
+    "reflects what you actually just wrote, not a stale copy. Call it after editing " +
+    "code, and fix what it reports before moving on.\n" +
+    "SCOPE: it checks the FILES YOU NAME and nothing else. Diagnostics are per-file, " +
+    `so if you omit path it checks only the ${MAX_WORKING_SET} files you touched most ` +
+    "recently. A change that breaks code elsewhere — you renamed a symbol, changed a " +
+    "signature, altered an exported type — will NOT show up here, because the broken " +
+    "file is the CALLER. After that kind of edit, find the callers with `references` " +
+    "and check those paths too.\n" +
+    "A clean result is weaker evidence than it looks: you also get \"no diagnostics\" " +
+    "when no language server handles that file type, when the server is too slow to " +
+    "answer, and when the path does not exist or cannot be read. So it confirms " +
+    "problems, it does not prove their absence. Treat a clean answer on code you " +
+    "expected to be broken as a reason to check the path and verify another way " +
+    "(build it, run the tests) rather than as a passing grade.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -66,10 +86,19 @@ export const diagnosticsTool: Tool = {
   },
 };
 
-/** The absolute paths to check: the given path, else the recent working set. */
+/**
+ * The absolute paths to check: the given path, else the most recently touched files.
+ *
+ * This used to read `reads.keys()` in Map order, which is INSERTION order — and
+ * `reads.set()` on a key that already exists does not move it. So a file read early
+ * and edited last kept its original position and fell outside the window, and the tool
+ * answered "No diagnostics" for files it had never looked at while the file just
+ * edited was broken. `touchedAt` is the recency stamp that survives a re-touch, and
+ * `selectActiveFiles` is the same ordering the working set already uses.
+ */
 function pickTargets(ctx: ToolContext, rawPath: string): string[] {
   if (rawPath) return [resolvePath(ctx, rawPath)];
-  return [...ctx.reads.keys()].slice(-MAX_WORKING_SET);
+  return selectActiveFiles(ctx.reads, MAX_WORKING_SET).map((f) => f.path);
 }
 
 /** Render diagnostics as `file:line:col severity: message`, errors first. Pure. */

@@ -8,15 +8,27 @@
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { relativize } from "./paths.js";
-import type { ShellInfo } from "./backgroundShells.js";
+import { MAX_READ_CHARS, type ShellInfo } from "./backgroundShells.js";
 
 export const shellOutput: Tool = {
   name: "shell_output",
   readOnly: true,
+  // The description never mentioned polling, while the tool itself pushes a strong
+  // don't-poll nudge at runtime; the two now agree. It also never mentioned either cap,
+  // and the buffer one matters: a chatty process can roll output out of the retained
+  // log between reads, so "everything since last time" is not always literally true.
   description:
-    "Read new output from a background shell (started by run_command). Returns only " +
-    "what's been printed since your last check, plus whether it's still running or has " +
-    "finished (with its exit code).",
+    "Read new output from a background shell started by run_command. Returns only what " +
+    "has been printed since your last check, plus whether it is still running or has " +
+    "finished and with what exit code. " +
+    "You normally do NOT need to call this on a loop: whether you are told about the " +
+    "shell is set by run_command's 'notify', and when you will be told, you are told " +
+    "automatically. Use this when you want the output itself, not to find out whether " +
+    "something has happened. " +
+    `A single read returns at most ${MAX_READ_CHARS.toLocaleString("en-US")} characters and says when it ` +
+    "has dropped earlier lines to fit. Separately, a very chatty process can overflow " +
+    "the retained log, in which case the oldest output is gone for good and the status " +
+    "line says so.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -60,7 +72,13 @@ export const shellOutput: Tool = {
 export const killShell: Tool = {
   name: "kill_shell",
   readOnly: false,
-  description: "Stop a running background shell by id (kills the whole process tree).",
+  description:
+    "Stop a running background shell by id. Kills the whole process tree, not just the " +
+    "shell, so a dev server that spawned its own children goes down with it. " +
+    "It records that YOU stopped it, which is what later lets the status be reported as " +
+    "stopped deliberately rather than guessed at as a crash. " +
+    "Stopping something already finished is not an error: you get told it was not " +
+    "running, and nothing else happens.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -84,7 +102,13 @@ export const killShell: Tool = {
 export const listShells: Tool = {
   name: "list_shells",
   readOnly: true,
-  description: "List background shells (running and recently finished) with their status.",
+  description:
+    "List background shells, running and recently finished. Each line answers the two " +
+    "questions worth asking about a background process: IS IT UP, distinguishing a " +
+    "server still starting from one that has come up, and WHY DID IT STOP, " +
+    "distinguishing a crash from the user closing it themselves from you stopping it. " +
+    "Reach for this before restarting anything: a process the user shut down should not " +
+    "be reopened, and an exit code alone cannot tell you which case you are in.",
   parameters: { type: "object", additionalProperties: false, properties: {} },
   async execute(_args, ctx): Promise<ToolResult> {
     const mgr = ctx.backgroundShells;
@@ -108,10 +132,13 @@ export const listShells: Tool = {
  */
 function statusLine(info: ShellInfo, ctx?: ToolContext): string {
   const where = ctx ? ` in ${relativize(ctx, info.cwd)}` : "";
+  // A rolled buffer means output is permanently gone. It was recorded and never shown,
+  // so an incomplete log looked exactly like a complete one.
+  const rolled = info.truncated ? " [earlier output dropped: this log is incomplete]" : "";
   if (info.status === "running") {
     const secs = Math.round((Date.now() - info.startedAt) / 1000);
     const state = info.notify === "on_failure" ? (info.ready ? "up" : "starting") : "running";
-    return `#${info.id} ${state} (${secs}s)${where}: ${info.command}`;
+    return `#${info.id} ${state} (${secs}s)${where}: ${info.command}${rolled}`;
   }
   const verb =
     info.stoppedBy === "user"
@@ -128,7 +155,7 @@ function statusLine(info: ShellInfo, ctx?: ToolContext): string {
   // Whether it ever came up is what separates "the user closed their app" from "it
   // never started", which the exit code alone cannot tell you.
   const cameUp = info.notify === "on_failure" && !info.stoppedBy ? (info.ready ? ", after it had come up" : ", never came up") : "";
-  return `#${info.id} ${verb}${cameUp}${where}: ${info.command}`;
+  return `#${info.id} ${verb}${cameUp}${where}: ${info.command}${rolled}`;
 }
 
 function toId(value: unknown): number | null {

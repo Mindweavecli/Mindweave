@@ -70,22 +70,34 @@ export const spawnSubagent: Tool = {
   // lets the model emit several read-only spawn_subagent calls in one message and have
   // them run concurrently.
   isConcurrencySafe: (args) => args.read_only === true,
+  // Three limits were enforced in code and absent from the text: a child cannot spawn
+  // its own child, parallel workers are capped, and running out of steps is a clean
+  // PAUSE rather than a failure. That last one changes what the model should do about
+  // it — re-spawn with a bigger budget, not abandon the approach or retry identically.
+  // The briefing advice was also making one point three times, which dilutes it.
   description:
-    "Delegate a focused, self-contained subtask to a child agent that has its own context, then get back " +
-    "just its result — the way to keep a wide search, an inventory, or a bounded chunk of work from filling " +
-    "your context with intermediate steps (e.g. \"find and list every call site of authFetch\"). The child " +
-    "does NOT see this conversation and cannot ask the user questions, so write a COMPLETE, standalone task: " +
-    "a clear objective, its boundaries (what NOT to touch), and — via output_format — the exact shape of the " +
-    "result you want back. Set read_only:true for research/inventory that must not change files.\n" +
-    "PARALLEL: emit SEVERAL read-only spawn_subagent calls in ONE message to run them at once and fan out over " +
-    "independent areas; give each a distinct slice so they don't duplicate work. Scale effort to the task: a " +
-    "lookup needs 1 worker, a comparison 2–4, and only genuinely independent areas warrant more. Sub-agents " +
-    "cost many more tokens than doing it inline, and most editing is sequential — delegate for independent " +
-    "READ/discovery, not to parallelize edits.\n" +
-    "BRIEF IT WELL: write to the child like a competent colleague who just walked in — it can't see this " +
-    "conversation. Never hand off the thinking: don't write \"based on your findings, fix the bug\" — do the " +
-    "synthesis yourself and give specifics (file paths, line numbers, exactly what to change). Terse " +
-    "command-style prompts produce shallow, generic work.",
+    "Delegate a focused, self-contained subtask to a child agent with its own context, " +
+    "then get back just its result. This is how a wide search, an inventory, or a " +
+    "bounded chunk of work stays out of your context (e.g. \"find and list every call " +
+    "site of authFetch\"). The child does NOT see this conversation and cannot ask the " +
+    "user anything, so the task must stand alone: the objective, its boundaries (what " +
+    "NOT to touch), and via output_format the exact shape of the result you want. " +
+    "Set read_only:true for research and inventory that must not change files.\n" +
+    "PARALLEL: emit several read-only calls in ONE message to fan out over independent " +
+    `areas, giving each a distinct slice so they do not duplicate work. Up to ` +
+    `${SUBAGENT_CONCURRENCY} run at once; beyond that they queue, so more workers stop ` +
+    "buying speed. A non-read-only child runs alone. Sub-agents cost far more tokens " +
+    "than doing the work inline, and most editing is sequential, so delegate for " +
+    "independent READ and discovery rather than to parallelise edits.\n" +
+    `LIMITS: a child gets ${SUBAGENT_BUDGET} tool rounds by default (raise with ` +
+    "max_steps). If it runs out it PAUSES cleanly and says so, with its findings " +
+    "intact — that is not a failure, and the fix is a bigger max_steps, not the same " +
+    "call again. A child cannot spawn its own children, so plan one level of " +
+    "delegation and do the rest yourself.\n" +
+    "BRIEF IT WELL: write to the child as you would to a competent colleague who just " +
+    "walked in and cannot see any of this. Do the thinking yourself and hand over " +
+    "specifics (file paths, line numbers, exactly what to change) rather than \"based " +
+    "on your findings, fix the bug\". Terse command-style prompts produce shallow work.",
   parameters: {
     type: "object",
     additionalProperties: false,

@@ -25,10 +25,28 @@ type Mode = "files_with_matches" | "content" | "count";
 export const grepTool: Tool = {
   name: "grep",
   readOnly: true,
+  // The old description named the modes and stopped, which left the model to read an
+  // empty result as "that string is not in this codebase". It often is: .gitignore is
+  // respected, so build output and generated code are invisible, and secrets and other
+  // agents' data are refused outright. A wrong "it does not exist" is worse than a slow
+  // search, because the model acts on it. The regex-flavour line matters for the same
+  // reason: a lookahead pattern fails with an error the model reads as "no matches".
   description:
     "Search file contents with a regular expression. `output_mode` is " +
     "'files_with_matches' (default, just paths), 'content' (matching lines), or " +
-    "'count'. Searches every session root unless `path` (a file, directory, or root label) is given.",
+    "'count'. Searches every session root unless `path` (a file, directory, or root label) is given. " +
+    "WHAT IS NOT SEARCHED, so an empty result is NOT proof a string is absent: anything " +
+    "the project's .gitignore excludes (build output, dist, generated code), node_modules " +
+    "and .git always, and secrets (.env, keys) plus other coding agents' data, which are " +
+    "refused rather than missing. If what you need lives in one of those, read the file " +
+    "directly instead of concluding it is not there. " +
+    "Avoid lookahead, lookbehind and backreferences; the search engine rejects them. " +
+    "Character classes, groups, alternation and anchors are all fine. " +
+    `Output stops after ${MAX_OUTPUT_LINES} matching lines and says so when it does, so ` +
+    "narrow with `glob` or `path` rather than assuming you have seen everything. " +
+    "To find the uses of a symbol you can NAME, try references first: it reads parsed " +
+    "code rather than raw text, so a mention in a comment or a string is not a match. " +
+    "Come back here when it reports a name-level answer and exact identity matters.",
   parameters: {
     type: "object",
     additionalProperties: false,

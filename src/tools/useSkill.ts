@@ -14,10 +14,22 @@ import { findSkill, loadSkillBody, substituteSkillArgs } from "../governor/skill
 export const useSkill: Tool = {
   name: "use_skill",
   readOnly: true,
+  // available_skills is a FILTERED view: a skill scoped with `globs` only appears when
+  // the working set matches, yet stays runnable by name. Describing the catalog as the
+  // set of runnable skills therefore understated what is reachable, and the one place
+  // the full list surfaces is the error you get for a name that does not exist.
   description:
     "Run one of this project's skills by name and get its full step-by-step " +
-    "instructions to follow. The skills you can run are listed under " +
-    "available_skills in your context; call this when one fits the task.",
+    "instructions back, to follow as written. Call this when a skill fits the task at " +
+    "hand — the steps are not in your context until you do, which is the point.\n" +
+    "available_skills lists the skills on offer right now, but it is filtered to what " +
+    "suits the files in play, so a project can hold skills it is not currently showing " +
+    "you. If you believe a skill exists, name it: an unknown name comes back with the " +
+    "complete list, which costs one call and beats assuming it is absent. Names match " +
+    "regardless of case and a leading slash is ignored.\n" +
+    "Pass `arguments` when the skill takes them — they fill its $ARGUMENTS and $1…$9 " +
+    "placeholders, and a skill with no placeholders receives them as extra context " +
+    "instead, so nothing you pass is silently dropped.",
   parameters: {
     type: "object",
     additionalProperties: false,

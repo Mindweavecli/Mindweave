@@ -95,6 +95,32 @@ test("a miss is honest and tells the model to stop guessing", async () => {
   }
 });
 
+test("a search cut off at the cap says so instead of looking exhaustive", async () => {
+  // Search is the ONLY door to a deferred catalog. A model handed 8 of 41 tools with no
+  // hint of the rest concludes the other 33 do not exist — and because they were never
+  // returned they were never activated either, so nothing else can reveal them.
+  const mgr = await poolOf(40);
+  try {
+    const r = await findMcpTools.execute({ query: "big" }, ctxWith(mgr)); // bare server name
+    assert.match(r.output, /top 8/, "a capped result must not read as the whole list");
+    assert.match(r.output, /search again with a narrower term/);
+    assert.ok(findMcpTools.description.includes("at most 8 tools"), "the cap belongs in the description too");
+  } finally {
+    await mgr.dispose();
+  }
+});
+
+test("a search that fits under the cap does NOT claim there is more", async () => {
+  // The other half: warning every time would train the model to ignore it.
+  const mgr = await poolOf(40);
+  try {
+    const r = await findMcpTools.execute({ query: "create issue" }, ctxWith(mgr));
+    assert.doesNotMatch(r.output, /top 8/);
+  } finally {
+    await mgr.dispose();
+  }
+});
+
 test("an empty query is refused rather than matching everything", async () => {
   const r = await findMcpTools.execute({ query: "  " }, ctxWith());
   assert.equal(r.isError, true);

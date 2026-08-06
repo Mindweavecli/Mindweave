@@ -14,6 +14,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  MAX_RESOURCES_LISTED,
   hasResources,
   parseResourceList,
   parseResourceRead,
@@ -73,6 +74,18 @@ test("a listing tells the model what to pass back, and marks templates as templa
   assert.match(rendered, /postgres:\/\/main\/table\/\{name\}/);
 });
 
+test("a flood of templates is capped, exactly as a flood of resources is", () => {
+  // The resources branch capped at 200; the templates branch iterated all of them. The
+  // length is chosen by a third party, and an unbounded external payload is a failure
+  // this project has already had once.
+  const templates = Array.from({ length: MAX_RESOURCES_LISTED + 12 }, (_, i) => ({
+    server: "db", uriTemplate: `logs://{date}/${i}`, name: `t${i}`, description: "", mimeType: "",
+  }));
+  const out = renderResourceList([], templates);
+  assert.equal(out.split("\n").filter((l) => l.startsWith("- ")).length, MAX_RESOURCES_LISTED);
+  assert.match(out, /… and 12 more/, "a silent cut misrepresents what the server offers");
+});
+
 test("a server without a resources capability is not asked", () => {
   assert.equal(hasResources({}), false);
   assert.equal(hasResources({ resources: { listChanged: true } }), true);
@@ -113,6 +126,27 @@ async function pool(root?: string): Promise<McpManager> {
   await mgr.start([cfg]);
   return mgr;
 }
+
+test("both resource tools accept the server name the model was actually shown", async () => {
+  // A server configured as `db.` is shown to the model as `db`, because that is what
+  // survives being embedded in a tool name. list_mcp_resources hand-rolled its own
+  // normalization (no run-collapsing, no edge-trimming) while read_mcp_resource used the
+  // shared one — so the listing rejected the exact name the read accepted.
+  const mgr = new McpManager();
+  await mgr.start([{ ...cfg, name: "db." }]);
+  const ctx = { mcp: mgr } as unknown as ToolContext;
+  try {
+    const listed = await listMcpResources.execute({ server: "db" }, ctx);
+    assert.notEqual(listed.isError, true, "the listing rejected the name the model is shown");
+    assert.match(listed.output, /db:\/\/schema/);
+
+    const read = await readMcpResource.execute({ server: "db", uri: "db://schema" }, ctx);
+    assert.notEqual(read.isError, true);
+    assert.match(read.output, /CREATE TABLE users/);
+  } finally {
+    await mgr.dispose();
+  }
+});
 
 test("resources are listed on demand and read by URI", async () => {
   const mgr = await pool();

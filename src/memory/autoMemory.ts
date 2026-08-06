@@ -16,9 +16,13 @@
  *                      header. Read on demand by the model (grep/read), not
  *                      auto-loaded.
  *
- * The model writes here through the `save_memory` tool (which confirms with the
- * user first). This module is the mechanism only — it does not decide WHAT is
- * worth remembering; that is the model's judgment, guided by the prompt.
+ * The model writes here through the `save_memory` tool, which saves SILENTLY: the
+ * user asked not to be made to approve each one. (This comment used to say the tool
+ * "confirms with the user first", which stopped being true when the prompt was
+ * dropped — worth stating plainly, because "we ask first" is exactly the kind of
+ * assurance someone reads once and then relies on.) This module is the mechanism
+ * only — it does not decide WHAT is worth remembering; that is the model's
+ * judgment, guided by the prompt.
  *
  * Like store.ts, this is the CLIENT side of the eventual client/server split:
  * the pure engine never calls in here. All writes are best-effort.
@@ -98,6 +102,16 @@ export interface SavedMemory {
   name: string;
   file: string; // the topic file name, e.g. "user-role.md"
   updated: boolean; // true when it replaced an existing memory of the same name
+  /**
+   * Set only when the memory overwritten was filed under a DIFFERENT name.
+   *
+   * Names are slugified and clipped to 60 characters, so two distinct names can land
+   * on one file — and then the write is not the update it appears to be, it is a
+   * deletion. "Memory is non-destructive" is the stated reason the user is never
+   * asked about a save, so the one case where that is untrue has to be reported
+   * rather than absorbed.
+   */
+  replaced?: string;
 }
 
 /**
@@ -113,25 +127,51 @@ export async function saveMemory(projectCwd: string, m: MemoryInput): Promise<Sa
   const file = `${slug}.md`;
   const path = join(dir, file);
 
-  const updated = await exists(path);
+  const previous = await existingName(path);
+  const updated = previous !== null;
   await fs.writeFile(path, renderMemoryFile(m), "utf8");
-  await upsertIndexLine(dir, file, `- [${m.name}](${file}) — ${m.indexLine}`);
+  await upsertIndexLine(dir, file, `- [${oneLine(m.name)}](${file}) — ${oneLine(m.indexLine)}`);
 
-  return { name: m.name, file, updated };
+  const replaced = previous && previous !== oneLine(m.name) ? previous : undefined;
+  return { name: m.name, file, updated, ...(replaced ? { replaced } : {}) };
+}
+
+/** The `name:` of the memory already at `path`, or null if there is no file there.
+ *  Returns "" for a file we cannot parse, which still counts as "something was here". */
+async function existingName(path: string): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(path, "utf8");
+    return /^name:[ \t]*(.*)$/m.exec(raw)?.[1]?.trim() ?? "";
+  } catch {
+    return null;
+  }
 }
 
 function renderMemoryFile(m: MemoryInput): string {
   // Flat key: value frontmatter, the same shape the governor and skills use.
+  // Values are flattened to ONE line: these are model-supplied strings going into a
+  // line-oriented format, so an embedded newline would start what parses as a new
+  // frontmatter key — a `description` ending in "\ntype: user" would silently
+  // re-file the memory. Nothing malicious is needed for this, just a pasted title.
   return [
     "---",
-    `name: ${m.name}`,
-    `description: ${m.description}`,
+    `name: ${oneLine(m.name)}`,
+    `description: ${oneLine(m.description)}`,
     `type: ${m.type}`,
     "---",
     "",
     m.body.trim(),
     "",
   ].join("\n");
+}
+
+/** Collapse any newline/carriage return into a space, so a value stays one field. */
+function oneLine(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Add or replace the index line that points at `file`, keeping MEMORY.md a flat list. */
@@ -144,11 +184,17 @@ async function upsertIndexLine(dir: string, file: string, line: string): Promise
     // No index yet.
   }
 
-  const linkToken = `(${file})`;
+  // Drop this file's own pointer line, and ONLY that. The old test was
+  // `line.includes("(file.md)")`, which matched anywhere in the line — so an index
+  // entry whose prose referenced another memory ("supersedes (user-role.md)") was
+  // deleted when that other memory was next saved. Index lines are model-written
+  // prose about memories, so cross-references are the expected content, and losing
+  // one silently removes a memory from the only listing that is always loaded.
+  const isPointerTo = (l: string) => new RegExp(`^\\s*-\\s*\\[[^\\]]*\\]\\(${escapeRegExp(file)}\\)`).test(l);
   if (current.trim()) {
     const kept = current
       .split("\n")
-      .filter((l) => !l.includes(linkToken)) // drop the old pointer to this file
+      .filter((l) => !isPointerTo(l))
       .join("\n")
       .replace(/\n{3,}/g, "\n\n")
       .trimEnd();

@@ -33,12 +33,23 @@ function caveat(confidence: Confidence): string {
 export const outlineTool: Tool = {
   name: "outline",
   readOnly: true,
+  // Two things were missing, and the second one matters more than it looks. A directory
+  // outline leads with a rollup (counts, the central symbols, which folders it depends
+  // on) that the description never mentioned, so the model had no reason to point this
+  // at a folder. And a directory outline stops after DIR_FILE_CAP files WITHOUT saying
+  // so, which means a model that outlines a 200-file folder believes it has seen the
+  // shape of all of it. Silent truncation is the worst kind: it looks like completeness.
   description:
-    "Show the structural outline of a file (its symbols + signatures, no bodies) " +
-    "or, for a directory, the outline of each file under it. Fast way to grasp " +
-    "shape without reading whole files. Works on HTML/CSS too: it lists a page's " +
-    "sections/ids and a stylesheet's selectors with line numbers — use it to navigate " +
-    "a big page instead of reading it top to bottom.",
+    "Show the structural outline of a file: its symbols and signatures, never bodies. " +
+    "Point it at a DIRECTORY and you get more than the files, you get a rollup first — " +
+    "how many files and symbols it holds, which symbols are most central to it, and " +
+    "which other folders it depends on. That is the fastest way to understand an " +
+    "unfamiliar area, and it costs one call. " +
+    `A directory outline covers at most ${DIR_FILE_CAP} files, so for anything larger ` +
+    "treat it as a sample and narrow to a subfolder. Files with no symbols are left out. " +
+    "Works on HTML and CSS too: it lists a page's sections and ids, and a stylesheet's " +
+    "selectors, with line numbers, so you can navigate a big page instead of reading it " +
+    "top to bottom.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -90,10 +101,24 @@ export const outlineTool: Tool = {
 export const definitionTool: Tool = {
   name: "definition",
   readOnly: true,
+  // "the exact file:line" was an overclaim: a name defined in two files returns BOTH,
+  // which is the right behaviour and needs saying, because a model told it gets THE
+  // location will take the first row. The genuinely useful part was also unstated:
+  // the declaration line comes back with the location, so most lookups need no read
+  // at all. Same two-level certainty as references, for the same reason.
   description:
-    "Find where a symbol (function, class, type, …) is defined, by name. Covers " +
-    "HTML/CSS too: pass a CSS class or id (e.g. \"hero-stats\") to jump to its style " +
-    "rule, or an element id to find that section — the exact file:line, no reading.",
+    "Find where a symbol (function, class, type, and so on) is defined, by name. " +
+    "Returns file:line PLUS the declaration itself, so for most lookups you never need " +
+    "to open the file; use read_symbol when you want the body. " +
+    "If the name is defined in more than one place you get EVERY definition rather than " +
+    "a best guess, so an ambiguous name is visible instead of silently resolved. " +
+    "Certainty comes in two levels and the output says which one you got: resolved when " +
+    "a language server has analyzed the file, otherwise a NAME match, which can include " +
+    "an unrelated symbol that happens to share the name. " +
+    "Covers HTML and CSS as well: pass a CSS class or id (e.g. \"hero-stats\") to jump " +
+    "to its style rule, or an element id to find that section. " +
+    "An empty result means it is not in the code map, which may still be indexing, so " +
+    "fall back to grep rather than concluding the symbol does not exist.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -119,10 +144,25 @@ export const definitionTool: Tool = {
 export const referencesTool: Tool = {
   name: "references",
   readOnly: true,
+  // The old description read as if this were full semantic resolution. It is not, and
+  // the difference decides whether the model can trust the list: refs are keyed by NAME
+  // in the graph, and only files a language server has analyzed come back `resolved`.
+  // The tool already prints that caveat at runtime; a model that has not been told the
+  // distinction up front reads a name-level list as certainty and refactors on it.
   description:
-    "Find where a symbol is referenced (used), by name. For a CSS class or id, this " +
-    "returns every HTML element and every script (getElementById/querySelector/" +
-    "classList) that uses it — the cross-language blast radius before you change a style.",
+    "Find where a symbol is used, by name. Reads PARSED code rather than raw text, so a " +
+    "mention inside a comment or a string is never a match. Returns file:line locations " +
+    `(up to ${REF_CAP}), not the code itself. ` +
+    "There are TWO levels of certainty here and the output tells you which one you got. " +
+    "When a language server has analyzed the files involved, the answer is resolved. " +
+    "Otherwise it is a NAME match, and a different symbol that happens to share the name " +
+    "in an unrelated file WILL appear in the list. When it says name-level and exact " +
+    "identity matters, confirm with grep or by opening the candidates before you act. " +
+    "For a CSS class or id this returns every HTML element and every script " +
+    "(getElementById/querySelector/classList) that uses it, which is the cross-language " +
+    "blast radius before you change a style. " +
+    "An empty result means nothing in the code map references it; the map may still be " +
+    "indexing, so fall back to grep rather than concluding the symbol is unused.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -147,14 +187,41 @@ export const referencesTool: Tool = {
 export const relevantTool: Tool = {
   name: "relevant",
   readOnly: true,
+  // This tool was effectively invisible. The old description said it showed "the code
+  // most relevant right now", which sounds like every other search tool and gave the
+  // model no way to tell when it beats one. What makes it different is the one thing
+  // that went unsaid: it is the only code tool that does not need a name as input.
+  // grep, definition and references all answer "where is X"; this answers "what is X"
+  // when you cannot name X yet. The ranking really is structural (personalized
+  // PageRank over the reference graph — see alternator/chassis/rank.ts), so the
+  // description says so rather than calling it relevance and leaving the model to
+  // guess whether that means text similarity.
   description:
-    "Show the code most relevant right now — symbols ranked by how central they are " +
-    "to the files you're working on. Good for orienting in an unfamiliar area.",
+    "Rank the symbols that matter most where you are working, WITHOUT needing to know " +
+    "their names. That is what makes it different: grep, definition and references all " +
+    "need you to already know what you are looking for, so none of them can answer " +
+    "'what is important in this part of the codebase'. This can. " +
+    "The ranking is structural rather than textual: a symbol scores by how much the " +
+    "codebase's own references converge on it, weighted toward the files you have been " +
+    "working in. Something twenty places depend on outranks a private helper, and a " +
+    "symbol in a different folder that your current work leans on still surfaces, " +
+    "because the whole workspace is ranked as one graph. " +
+    "Returns locations only (file:line, kind, name), not code, so follow up with " +
+    "read_symbol on anything worth opening. " +
+    "Reach for it when you land in unfamiliar code, or before changing an area you do " +
+    "not know well and want to see what actually depends on what. Use outline for the " +
+    "shape of one file, definition or references for a symbol you can already name, and " +
+    "grep for text.",
   parameters: {
     type: "object",
     additionalProperties: false,
     properties: {
-      path: { type: "string", description: "Focus file/dir. Defaults to the files you've recently read." },
+      path: {
+        type: "string",
+        description:
+          "Aim the ranking at this file or directory. Omit it to rank around the files " +
+          "you have read most recently, which is usually what you want mid-task.",
+      },
       limit: { type: "integer", minimum: 1, description: "Max symbols to return (default 25)." },
     },
   },

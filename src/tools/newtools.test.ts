@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
 import { todoWrite, todoListText } from "./todo.js";
-import { webFetch } from "./webFetch.js";
+import { webFetch, normalizeUrl, ssrfReason } from "./webFetch.js";
 
 function ctx(): ToolContext {
   return { cwd: process.cwd(), reads: new Map(), todos: [] };
@@ -91,3 +91,58 @@ test(
     assert.match(r.output, /Example Domain/i);
   },
 );
+
+// ── web_fetch: the two claims that save a wasted call ────────────────────────
+
+test("a bare host really is accepted and upgraded to https", () => {
+  // The description now promises this; if normalizeUrl stopped defaulting the scheme,
+  // a model following the text would send a URL the tool rejects.
+  const out = normalizeUrl("example.com");
+  assert.ok(typeof out !== "string", `expected a URL, got error: ${out}`);
+  assert.equal((out as URL).protocol, "https:");
+  assert.match(webFetch.description, /bare host is fine/i);
+});
+
+test("http is upgraded and private addresses are refused", () => {
+  const upgraded = normalizeUrl("http://example.com");
+  assert.ok(typeof upgraded !== "string");
+  assert.equal((upgraded as URL).protocol, "https:");
+  for (const host of ["http://localhost/x", "http://127.0.0.1/x", "http://192.168.1.5/x"]) {
+    const u = normalizeUrl(host);
+    assert.ok(typeof u !== "string");
+    assert.equal(typeof ssrfReason(u as URL), "string", `${host} must be refused`);
+  }
+});
+
+test("web_fetch's stated distill threshold is the real constant", () => {
+  assert.match(webFetch.description, /longer than 12,000 characters/i);
+});
+
+// ── todo_write: the list really is echoed back every turn ────────────────────
+// Without knowing this, the model calls todo_write just to see the list, or restates
+// it in prose. Both are pure waste, and both are avoidable by saying so once.
+
+test("the live list is rendered into the per-turn context, as the description claims", () => {
+  const ctx = { cwd: process.cwd(), reads: new Map(), todos: [] } as unknown as ToolContext;
+  assert.equal(todoListText(ctx), "", "an empty list contributes nothing");
+
+  ctx.todos = [
+    { content: "Run the tests", activeForm: "Running the tests", status: "in_progress" },
+    { content: "Fix the bug", activeForm: "Fixing the bug", status: "pending" },
+  ];
+  const rendered = todoListText(ctx);
+  assert.match(rendered, /Running the tests/, "the active task shows its present-continuous form");
+  assert.match(rendered, /Fix the bug/);
+  assert.match(todoWrite.description, /put back in front of you every turn/i);
+});
+
+test("todo_write clears the list once everything is completed", async () => {
+  const ctx = { cwd: process.cwd(), reads: new Map(), todos: [] } as unknown as ToolContext;
+  const r = await todoWrite.execute(
+    { todos: [{ content: "a", activeForm: "doing a", status: "completed" }] },
+    ctx,
+  );
+  assert.match(r.output, /All tasks completed/i);
+  assert.deepEqual(ctx.todos, [], "a finished list must disappear rather than linger");
+  assert.match(todoWrite.description, /the list clears itself/i);
+});

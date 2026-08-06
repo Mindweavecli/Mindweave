@@ -189,6 +189,28 @@ export interface WriteOutcome {
 }
 
 /**
+ * Is a server of this name already configured at `path`?
+ *
+ * Exists so a caller can say what the write will actually DO before asking the user to
+ * approve it. `addServerToConfig` already reports `replaced`, but only afterwards, and
+ * "add this server?" answered yes should not quietly overwrite a working integration
+ * the user had already set up.
+ */
+export async function serverExistsInConfig(path: string, name: string): Promise<boolean> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const root = parsed as Record<string, unknown>;
+    const key = root.servers && !root.mcpServers ? "servers" : "mcpServers";
+    const servers = root[key];
+    if (!servers || typeof servers !== "object") return false;
+    return Object.prototype.hasOwnProperty.call(servers, name);
+  } catch {
+    return false; // no file, or unreadable — nothing to replace
+  }
+}
+
+/**
  * Write a server into an mcp.json, preserving everything already there.
  *
  * Read-modify-write rather than overwrite: this file is hand-editable and may hold

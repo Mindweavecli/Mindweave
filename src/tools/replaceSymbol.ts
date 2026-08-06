@@ -27,13 +27,28 @@ import { rawLines, spliceLines } from "./spanCore.js";
 export const replaceSymbolBody: Tool = {
   name: "replace_symbol_body",
   readOnly: false,
+  // Two problems. The description implied `path` resolves any ambiguity, but a name
+  // defined TWICE IN ONE FILE cannot be narrowed by a path at all, and there is no
+  // other parameter for it — a model following the old text would keep re-sending the
+  // same path and getting the same refusal. The escape hatch is edit_file, and it now
+  // says so. It also never mentioned that the result comes back line-numbered, which is
+  // the thing that lets a rewrite be followed by more edits without re-reading.
   description:
-    "Replace a whole symbol (function, class, method, type, …) with a new definition, by name. " +
-    "Give the symbol `name` and the complete `new_definition` (its signature AND body). The tool " +
-    "locates the symbol via the code map and swaps its lines — no exact old_string needed. Read the " +
-    "symbol first (read_symbol). Pass `path` when the name is defined in more than one file; if the " +
-    "target is ambiguous the tool changes nothing and asks you to narrow it. Prefer this when you are " +
-    "rewriting a whole function or class; use edit_file or multi_edit for changes WITHIN one.",
+    "Replace a whole symbol (function, class, method, type, and so on) with a new " +
+    "definition, by name. Give the symbol `name` and the complete `new_definition`, its " +
+    "signature AND body. The tool locates the symbol and swaps its lines, so no exact " +
+    "old_string is needed. Read the symbol first with read_symbol. " +
+    "AMBIGUITY IS REFUSED, never guessed: if the name resolves to more than one symbol " +
+    "nothing is written and you are shown the candidates. When those are in different " +
+    "files, `path` picks one. When the SAME file defines the name twice, `path` cannot " +
+    "help and there is no parameter that can, so use edit_file with an exact old_string " +
+    "instead. " +
+    "On success you get the new definition back WITH line numbers, so you can make " +
+    "further edits from the result instead of re-reading the file. " +
+    "A `new_definition` identical to what is already there is refused rather than " +
+    "written as a no-op edit. " +
+    "Prefer this when you are rewriting a whole function or class; use edit_file or " +
+    "multi_edit for changes WITHIN one.",
   parameters: {
     type: "object",
     additionalProperties: false,

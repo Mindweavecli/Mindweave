@@ -13,20 +13,39 @@
  * how every other governed action in the codebase fails.
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
-import { addServerToConfig, configPathFor, parseAddSpec, type AddScope } from "../mcp/configWrite.js";
+import { addServerToConfig, configPathFor, parseAddSpec, serverExistsInConfig, type AddScope } from "../mcp/configWrite.js";
 
 const ADD = "Yes, add it";
+const REPLACE = "Yes, replace it";
 const SKIP = "No, don't";
 
 export const addMcpServer: Tool = {
   name: "add_mcp_server",
   readOnly: false,
+  // The credential guidance was WRONG, not merely thin. It told the model to reference
+  // an environment variable, and the parameter example showed "$GITHUB_TOKEN" — but
+  // nothing expands `$VAR` anywhere in the MCP layer (measured), so that value reaches
+  // the server as the literal seven-dollar string and the server fails to authenticate,
+  // looking like a bad token rather than a bad config. Meanwhile the parent environment
+  // is already inherited, so the variable the model was told to "reference" needed no
+  // mention at all. The correct advice is close to the opposite of what was written.
   description:
-    "Connect a new MCP server to this project, so its tools become available to you. " +
-    "Use it when the user asks to add an integration ('add the github mcp server', " +
-    "'connect to our postgres'). Give either a `command` (with `args`) for a local " +
-    "server, or a `url` for a remote one. The user is always asked to confirm first. " +
-    "Don't invent credentials — reference an environment variable the user named.",
+    "Connect a new MCP server to this project so its tools become available to you. " +
+    "Use it when the user asks to add an integration: 'add the github mcp server', " +
+    "'connect to our postgres'. Give either a `command` (with `args`) for a local " +
+    "server or a `url` for a remote one, never both. The user is always asked to " +
+    "confirm, and is told if this would replace a server of the same name.\n" +
+    "CREDENTIALS: the server already inherits the user's whole environment, so a token " +
+    "that is ALREADY set in their shell needs no `env` entry — leave it out and it just " +
+    "works. `env` values are NOT expanded: \"$GITHUB_TOKEN\" is passed through as those " +
+    "literal characters, not as the variable's contents, which fails as an invalid " +
+    "credential rather than as an obvious mistake. So use `env` only for a literal " +
+    "value the user gave you for this purpose, knowing it is written to a config file " +
+    "in plain text. Never invent, guess, or copy a credential from elsewhere in the " +
+    "conversation; if one is needed and you do not have it, ask.\n" +
+    "The name becomes the prefix of every tool the server offers (`github` → " +
+    "`mcp__github__*`), so keep it short and recognisable. Default to this project; " +
+    "`global: true` follows the user into unrelated work and is rarely what they mean.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -52,7 +71,10 @@ export const addMcpServer: Tool = {
       env: {
         type: "object",
         additionalProperties: { type: "string" },
-        description: "Environment variables for a local server, e.g. {\"GITHUB_TOKEN\": \"$GITHUB_TOKEN\"}.",
+        description:
+          "Literal environment variables for a local server. NOT expanded — \"$FOO\" is " +
+          "passed as those characters. Omit for anything already set in the user's shell; " +
+          "the server inherits it.",
       },
       headers: {
         type: "object",
@@ -80,17 +102,30 @@ export const addMcpServer: Tool = {
       };
     }
 
+    const root = ctx.governance?.forbidden.root ?? ctx.cwd;
+    const path = configPathFor(spec.scope, root);
+
+    // Say what the write will actually DO, before consent is given rather than after.
+    // Two things were missing and both change the answer: that an existing server of
+    // this name is being REPLACED (the code knew, but only reported it afterwards),
+    // and that credentials are being written to a file. Only the KEYS are shown — the
+    // values are the secret, and putting one on screen also puts it in the transcript.
+    const replacing = await serverExistsInConfig(path, spec.parsed.name);
+    const secretKeys = [...Object.keys(spec.parsed.config.type === "http" ? (spec.parsed.config.headers ?? {}) : (spec.parsed.config.env ?? {}))];
+    const verb = replacing ? `REPLACE the existing MCP server '${spec.name}'` : `Add the MCP server '${spec.name}'`;
+    const creds =
+      secretKeys.length > 0
+        ? ` It stores ${secretKeys.join(", ")} in ${path}, in plain text.`
+        : "";
     const choice = await ctx.requestApproval(
-      `Add the MCP server '${spec.name}'? It will run ${spec.what} on every session in ` +
-        `${spec.scope === "global" ? "every project" : "this project"}, and its tools become available to me.`,
-      [ADD, SKIP],
+      `${verb}? It will run ${spec.what} on every session in ` +
+        `${spec.scope === "global" ? "every project" : "this project"}, and its tools become available to me.${creds}`,
+      [replacing ? REPLACE : ADD, SKIP],
     );
-    if (choice !== ADD) {
+    if (choice !== ADD && choice !== REPLACE) {
       return { output: `Not added. '${spec.name}' was not written to any config.`, summary: "declined" };
     }
 
-    const root = ctx.governance?.forbidden.root ?? ctx.cwd;
-    const path = configPathFor(spec.scope, root);
     const written = await addServerToConfig(path, spec.parsed).catch((e: unknown) => e as Error);
     if (written instanceof Error) {
       return { output: `Error: couldn't write ${path}: ${written.message}`, isError: true, summary: "write failed" };
@@ -125,6 +160,13 @@ function specFromArgs(args: Record<string, unknown>):
   | { ok: false; error: string } {
   const name = typeof args.name === "string" ? args.name.trim() : "";
   if (!name) return { ok: false, error: "`name` is required." };
+  // The name is handed to the shared parser as a positional argument, so a name shaped
+  // like a flag gets consumed as one. That is not an escalation (checked: every such
+  // name fails), but it fails as "A command is required" when a command WAS given,
+  // which sends you looking in the wrong place. Reject it where the cause is known.
+  if (name.startsWith("-")) {
+    return { ok: false, error: `'${name}' cannot be a server name — it starts with a dash and reads as an option.` };
+  }
 
   const url = typeof args.url === "string" ? args.url.trim() : "";
   const command = typeof args.command === "string" ? args.command.trim() : "";

@@ -104,11 +104,37 @@ export function renderSkillCatalog(skills: SkillMeta[], workingSet: string[] = [
 export function substituteSkillArgs(body: string, argString: string): string {
   const args = argString.trim();
   const positional = args.length > 0 ? args.split(/\s+/) : [];
-  const hasPlaceholder = /\$ARGUMENTS\b/.test(body) || /\$\d+/.test(body);
+  const hasPlaceholder = /\$ARGUMENTS\b/.test(body) || POSITIONAL.test(body);
 
-  let out = body.replace(/\$ARGUMENTS\b/g, args);
-  out = out.replace(/\$(\d+)/g, (_, n: string) => positional[Number(n) - 1] ?? "");
+  // ONE pass over the original body. Two chained replaces meant a `$1` inside the
+  // user's own argument string was then treated as a placeholder and substituted again.
+  const out = body.replace(SUBSTITUTION, (match, digit?: string) => {
+    if (digit === undefined) return args;
+    // Leave the placeholder visible when nothing was supplied for it. Blanking it makes
+    // a skill that expected an argument read as though it never wanted one.
+    return positional[Number(digit) - 1] ?? match;
+  });
 
-  if (!hasPlaceholder && args) out += `\n\nAdditional context from the user: ${args}`;
+  if (!hasPlaceholder && args) return `${out}\n\nAdditional context from the user: ${args}`;
   return out;
 }
+
+/**
+ * A positional placeholder: `$1`–`$9`, and NOT the start of a longer number.
+ *
+ * A skill body is a markdown playbook, so it very reasonably contains shell
+ * (`awk '{print $1}'`) and money (`$100`). The old pattern was `/\$(\d+)/`, which
+ * matched `$100` as positional argument one hundred, found nothing, and substituted
+ * the empty string — so `Budget is $100` silently became `Budget is `, and with no
+ * arguments at all EVERY `$n` in the body was deleted. The instructions the model was
+ * told to follow were quietly not the instructions on disk. Single digit matches the
+ * shell convention the syntax is borrowed from.
+ */
+const POSITIONAL_SRC = String.raw`\$([1-9])(?!\d)`;
+
+/** Detects one, for deciding whether the skill declared any placeholder at all. */
+const POSITIONAL = new RegExp(POSITIONAL_SRC);
+
+/** Replaces every placeholder in one pass. Shares POSITIONAL's source so the two
+ *  cannot drift into disagreeing about what counts as a placeholder. */
+const SUBSTITUTION = new RegExp(String.raw`\$ARGUMENTS\b|` + POSITIONAL_SRC, "g");

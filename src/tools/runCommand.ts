@@ -73,19 +73,31 @@ export function commandShellLabel(): string {
 export const runCommand: Tool = {
   name: "run_command",
   readOnly: false,
+  // Two claims in the previous version of this description were false, and both were
+  // the kind a model obeys without being able to check. It promised that a backgrounded
+  // command would report when it finished, which is true only for notify:'on_finish'
+  // and flatly contradicted by 'on_failure' (the default for anything server-shaped).
+  // And it warned that a never-terminating command would "hang the turn", which the
+  // soft timeout has made untrue, while scaring the model away from the very feature
+  // built for it. What replaced them is what actually happens.
   description:
     `Run a shell command in the project and return its combined output and exit ` +
     `code. The shell is ${commandShellLabel()}. Every turn starts at the project root; ` +
     `the working directory persists between calls WITHIN a turn (so 'cd' carries over ` +
-    `mid-turn) but resets to the root next turn. A command still running after 2 minutes ` +
-    `(or 'timeout' ms, up to 10) is MOVED TO THE BACKGROUND, not killed — you get a ` +
-    `shell id, the session continues, and you're told when it finishes; read its ` +
-    `output with shell_output. Pass 'run_in_background: true' to background it from ` +
-    `the start (a dev server, a long build/test you don't need to wait on). ` +
+    `mid-turn) but resets to the root next turn. ` +
+    `A command still running after 2 minutes (or 'timeout' ms, up to 10 minutes) is ` +
+    `MOVED TO THE BACKGROUND, not killed: you get a shell id and the session carries on. ` +
+    `Read its output any time with shell_output. WHAT YOU HEAR AFTERWARDS IS SET BY ` +
+    `'notify', so choose it deliberately: only 'on_finish' reports that the command ` +
+    `ended, and it is not the default for everything. ` +
+    `Pass 'run_in_background: true' to background it from the start, and do that for a ` +
+    `dev server, a long build or test you do not need to wait on, and anything ` +
+    `interactive or never-terminating. Waiting on one of those inline will not hang the ` +
+    `turn, but it burns the whole timeout before backgrounding itself, which is time ` +
+    `spent for nothing. ` +
     `Write commands for ${commandShellLabel()} (see the shell section of the system prompt)` +
     `${IS_WINDOWS ? "; or pass shell:'cmd' to run in cmd.exe instead (for && / || chaining or cmd-only tools)" : ""}. ` +
-    `Prefer Mindweave's read/edit/search tools over shelling out, and never run an interactive or ` +
-    `never-terminating command inline (it will hang the turn) — background it instead.`,
+    `Prefer Mindweave's read/edit/search tools over shelling out.`,
   parameters: {
     type: "object",
     additionalProperties: false,

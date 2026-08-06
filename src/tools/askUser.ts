@@ -13,17 +13,28 @@
  * the question to the human and the answer back.
  */
 import type { Tool, ToolResult } from "./types.js";
+import { APPROVAL_DISMISSED } from "./approval.js";
 
 export const askUserTool: Tool = {
   name: "ask_user",
   readOnly: true,
+  // The old text promised "the user's choice is returned to you" with no account of the
+  // two ways that does not happen — dismissal, and no channel at all. Both now return a
+  // plain instruction to carry on, so the model must know they are possible or it will
+  // read either one as a choice.
   description:
-    "Ask the user a focused question when the task is genuinely ambiguous or " +
-    "underspecified and you cannot proceed well without their input (e.g. which of " +
-    "two real approaches they want, a missing requirement, an unclear denial). " +
-    "Provide 2-4 concrete options; the user's choice is returned to you. Use it " +
-    "sparingly — do not ask about things you can decide with sensible defaults or " +
-    "discover by reading the project. Prefer acting when the answer is obvious.",
+    "Ask the user a focused question when the task is genuinely ambiguous and you " +
+    "cannot proceed well without their input: which of two real approaches they want, " +
+    "a missing requirement, an unclear denial. Give 2-4 concrete options — only the " +
+    "first 4 are shown — and their choice comes back to you.\n" +
+    "Use it sparingly. Anything you can settle with a sensible default, or find out by " +
+    "reading the project, is not a question; asking about it spends the user's " +
+    "attention on work they delegated. Prefer acting when the answer is obvious, and " +
+    "prefer one question that decides the direction over several small ones.\n" +
+    "You may not get an answer: the user can dismiss the question, and some sessions " +
+    "have no way to ask at all. Both come back saying so, and neither is a choice — do " +
+    "not treat an option as picked. Carry on with the most reasonable default, say " +
+    "which one you assumed, and do any part of the work that does not depend on it.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -63,6 +74,20 @@ export const askUserTool: Tool = {
     }
 
     const choice = await ctx.requestApproval(question, options.slice(0, 4));
+    // Dismissing the question is not an answer, and must never be reported as one.
+    // It used to resolve as the second option, so "Postgres or SQLite?" dismissed came
+    // back as "The user chose: SQLite" — a decision attributed to someone who declined
+    // to make it, which is worse than not having asked.
+    if (choice === APPROVAL_DISMISSED) {
+      return {
+        output:
+          "The user dismissed the question without answering, so you do not have their " +
+          "preference. Do not treat any option as chosen. Proceed with the most " +
+          "reasonable default and say which one you assumed, or continue with the part " +
+          "of the work that does not depend on the answer.",
+        summary: `asked: ${clip(question)} → dismissed`,
+      };
+    }
     return {
       output: `The user chose: ${choice}`,
       summary: `asked: ${clip(question)} → ${clip(choice)}`,

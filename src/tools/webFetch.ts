@@ -34,12 +34,20 @@ turndown.remove(["script", "style", "noscript", "iframe"]);
 export const webFetch: Tool = {
   name: "web_fetch",
   readOnly: true,
+  // This description was already accurate, so only two things were added, both of
+  // which prevent a wasted call: a bare host works (no need to hand-build the scheme),
+  // and on a page small enough to return whole the `prompt` simply is not used, which
+  // otherwise reads as the prompt having been ignored or failed.
   description:
     "Fetch a web page and return its content as readable markdown. Give a `url` and " +
-    "optionally a `prompt` describing what to extract — for a large page, the prompt " +
-    "is used to return just the relevant answer. Use it to read docs, articles, " +
-    "changelogs, or any public URL. http is upgraded to https; private/localhost URLs " +
-    "are refused. For GitHub, prefer the gh CLI via run_command when you can.",
+    "optionally a `prompt` describing what to extract. Use it to read docs, articles, " +
+    "changelogs, or any public URL. " +
+    `A page longer than ${DISTILL_OVER_CHARS.toLocaleString("en-US")} characters is ` +
+    "condensed against your `prompt` so you get the answer rather than the page; below " +
+    "that you simply get the whole thing, and the prompt is not needed. " +
+    "A bare host is fine (\"example.com\" becomes https://example.com), http is upgraded " +
+    "to https, and private or localhost addresses are refused. " +
+    "For GitHub, prefer the gh CLI via run_command when you can.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -193,7 +201,7 @@ async function distill(content: string, prompt: string): Promise<string | null> 
 // ── url + safety ──────────────────────────────────────────────────────────────
 
 /** Validate, default-to-https, and upgrade http→https. Returns a URL or an error string. */
-function normalizeUrl(raw: string): URL | string {
+export function normalizeUrl(raw: string): URL | string {
   let text = raw;
   if (!/^[a-z]+:\/\//i.test(text)) text = "https://" + text; // bare host → https
   let url: URL;
@@ -208,7 +216,7 @@ function normalizeUrl(raw: string): URL | string {
 }
 
 /** Basic SSRF guard: refuse localhost and private/link-local hosts. */
-function ssrfReason(url: URL): string | null {
+export function ssrfReason(url: URL): string | null {
   const host = url.hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) {
     return `Refusing to fetch a local address (${host}).`;

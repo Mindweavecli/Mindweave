@@ -13,6 +13,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { findMatches } from "./editCore.js";
+import { writeFile } from "./writeFile.js";
+import { replaceSymbolBody } from "./replaceSymbol.js";
+import { CodeChassis } from "../alternator/chassis/index.js";
 import { promises as fs } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -135,4 +139,130 @@ test("the agent's OWN writes never trip the gate", async () => {
   const second = await editFile.execute({ path: "app.py", old_string: "return 43", new_string: "return 44" }, ctx);
   assert.ok(!second.isError, second.output);
   assert.match(await readFile(path, "utf8"), /return 44/);
+});
+
+// ── the description has to match the matcher ──────────────────────────────────
+// edit_file's description claims the matcher forgives indentation and line endings
+// but not skipped or reordered lines. Those are behaviours in editCore, and a
+// description that oversells leniency invites the sloppy input that makes a
+// wrong-place edit possible, while one that undersells it costs whole-file re-reads
+// to recover bytes the tool never needed.
+
+test("indentation really is forgiven, as the description promises", () => {
+  const file = "function a() {\n    return 1;\n}\n";
+  // Same lines, different leading whitespace: the line-trimmed tier must find it.
+  const r = findMatches(file, "function a() {\nreturn 1;\n}");
+  assert.equal(r.matches.length, 1, "a differently-indented block must still match");
+  assert.equal(r.tier, "line-trimmed");
+  assert.match(editFile.description, /leading and trailing whitespace ignored/i);
+});
+
+test("an exact match still wins over the looser tier", () => {
+  const file = "const a = 1;\n";
+  const r = findMatches(file, "const a = 1;");
+  assert.equal(r.tier, "exact", "strictest tier first, or a loose match could win wrongly");
+});
+
+test("a skipped line is NOT forgiven, as the description warns", () => {
+  const file = "one\ntwo\nthree\n";
+  const r = findMatches(file, "one\nthree");
+  assert.equal(r.matches.length, 0, "skipping a line must not match");
+  assert.match(editFile.description, /skipped, reordered, or extra line/i);
+});
+
+test("the description no longer claims an exact-bytes match is required", () => {
+  // The claim that cost the re-reads.
+  assert.doesNotMatch(editFile.description, /must match the file's text/i);
+});
+
+// ── write_file's description promises three services; they must exist ─────────
+// Each one exists to stop the model doing work by hand: shelling out to mkdir,
+// hand-matching line endings it cannot see, or doing a redundant full read before
+// overwriting a file it already read one symbol of.
+
+test("write_file creates missing parent directories, as promised", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mw-wf-"));
+  const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+  const r = await writeFile.execute({ path: "a/b/c/new.ts", content: "export const x = 1;\n" }, ctx);
+  assert.ok(!r.isError, `nested write should succeed, got: ${r.output}`);
+  assert.equal(await readFile(join(dir, "a/b/c/new.ts"), "utf8"), "export const x = 1;\n");
+  assert.match(writeFile.description, /parent directories are created/i);
+});
+
+test("an existing file keeps its own line endings, as promised", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mw-wf-"));
+  const p = join(dir, "crlf.ts");
+  await fs.writeFile(p, "a\r\nb\r\n");
+  const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+  // Satisfy the read gate the way the description says it can be satisfied.
+  ctx.reads.set(p, { mtimeMs: 0, size: 0, full: true, touchedAt: 1 });
+  // The model only ever emits LF.
+  await writeFile.execute({ path: "crlf.ts", content: "x\ny\n" }, ctx);
+  assert.ok((await readFile(p, "utf8")).includes("\r\n"), "CRLF must be preserved, not converted");
+  assert.match(writeFile.description, /existing file keeps its own/i);
+});
+
+test("the read gate is satisfied by ctx.reads, not specifically by read_file", async () => {
+  // The description says read_symbol counts too. It counts because the gate looks at
+  // ctx.reads, which read_symbol also fills.
+  const dir = await mkdtemp(join(tmpdir(), "mw-wf-"));
+  const p = join(dir, "e.ts");
+  await fs.writeFile(p, "old\n");
+  const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+  const refused = await writeFile.execute({ path: "e.ts", content: "new\n" }, ctx);
+  assert.equal(refused.isError, true, "an unread existing file must not be clobbered");
+  ctx.reads.set(p, { mtimeMs: 0, size: 0, full: false, touchedAt: 1 });
+  const allowed = await writeFile.execute({ path: "e.ts", content: "new\n" }, ctx);
+  assert.ok(!allowed.isError, "any recorded read satisfies the gate");
+  assert.match(writeFile.description, /read_file or read_symbol both count/i);
+});
+
+// ── replace_symbol_body: the ambiguity escape hatch, and the numbered result ──
+// The old description said to pass `path` when a name is defined more than once. For
+// two definitions in ONE file that is unactionable advice: no path narrows it, so a
+// model that believes the text retries the same call forever.
+
+test("same-file ambiguity is refused and `path` cannot fix it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mw-rsb-"));
+  const p = join(dir, "dup.ts");
+  // Two functions with the same name in ONE file.
+  await fs.writeFile(p, "function twice() { return 1; }\nexport const x = 1;\nfunction twice() { return 2; }\n");
+  const chassis = new CodeChassis(dir, { lsp: false });
+  await chassis.build();
+  const ctx = { cwd: dir, reads: new Map(), chassis, todos: [] } as unknown as ToolContext;
+  ctx.reads.set(p, { mtimeMs: 0, size: 0, full: true, touchedAt: 1 });
+
+  const r = await replaceSymbolBody.execute(
+    { name: "twice", new_definition: "function twice() { return 3; }", path: "dup.ts" },
+    ctx,
+  );
+  assert.equal(r.isError, true, "an ambiguous target must never be guessed");
+  assert.match(r.output, /ambiguous/i);
+  assert.match(r.output, /No changes were written/i);
+  // The file must be untouched.
+  assert.match(await readFile(p, "utf8"), /return 1/);
+  // And the description must send the model somewhere that actually works.
+  assert.match(replaceSymbolBody.description, /use edit_file with an exact old_string/i);
+});
+
+test("a successful replace returns the new definition WITH line numbers", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mw-rsb2-"));
+  const p = join(dir, "one.ts");
+  await fs.writeFile(p, "export function only() {\n  return 1;\n}\n");
+  const chassis = new CodeChassis(dir, { lsp: false });
+  await chassis.build();
+  const ctx = { cwd: dir, reads: new Map(), chassis, todos: [] } as unknown as ToolContext;
+  // A REAL read record. With mtime/size left at 0 the freshness gate correctly refuses
+  // the edit, which is the gate working rather than a bug: this fixture has to look
+  // like a file the model actually read.
+  const st = await fs.stat(p);
+  ctx.reads.set(p, { mtimeMs: st.mtimeMs, size: st.size, full: true, touchedAt: 1 });
+
+  const r = await replaceSymbolBody.execute(
+    { name: "only", new_definition: "export function only() {\n  return 42;\n}" },
+    ctx,
+  );
+  assert.ok(!r.isError, `expected success, got: ${r.output}`);
+  assert.match(r.output, /\b1\b.*export function only/, "the result must carry line numbers");
+  assert.match(replaceSymbolBody.description, /WITH line numbers/i);
 });

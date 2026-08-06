@@ -8,7 +8,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolContext } from "./types.js";
@@ -18,7 +19,7 @@ import { editFile, numberedWindow } from "./editFile.js";
 import { runCommand } from "./runCommand.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
-import { listDir } from "./listDir.js";
+import { MAX_ENTRIES, listDir } from "./listDir.js";
 import { protectedPathReason, catastrophicCommandReason } from "./guard.js";
 
 function freshCtx(): ToolContext {
@@ -285,6 +286,79 @@ test("list_dir shows directories first with a trailing slash", async () => {
   assert.match(r.output, /readme\.md/);
 });
 
+test("a symlinked directory is marked as a directory, not shown as a file", async () => {
+  // readdir does not follow links: for a junction/symlink to a directory BOTH
+  // isDirectory() and isFile() are false (measured). So the trailing slash that is
+  // the entire reading key never appeared, and a linked package directory looked
+  // exactly like an ordinary file — in node_modules/.bin and linked monorepos, which
+  // is where links actually turn up.
+  const ctx = freshCtx();
+  await fs.mkdir(join(ctx.cwd, "realdir"));
+  await fs.writeFile(join(ctx.cwd, "plain.txt"), "x");
+  try {
+    await fs.symlink(join(ctx.cwd, "realdir"), join(ctx.cwd, "linkdir"), "junction");
+  } catch {
+    return; // no privilege to create links here; nothing to assert
+  }
+  const r = await listDir.execute({}, ctx);
+  assert.match(r.output, /linkdir\/\s+\(symlink\)/, "a linked directory must carry the slash");
+  // And it must sort with the directories, above the plain files.
+  assert.ok(r.output.indexOf("linkdir/") < r.output.indexOf("plain.txt"));
+});
+
+test("a broken symlink says so rather than passing as a file", async () => {
+  const ctx = freshCtx();
+  try {
+    await fs.symlink(join(ctx.cwd, "gone"), join(ctx.cwd, "dangling"), "junction");
+  } catch {
+    return;
+  }
+  const r = await listDir.execute({}, ctx);
+  assert.match(r.output, /dangling\s+\(broken symlink\)/);
+});
+
+test("pointing list_dir at a file says it is a file, not that nothing is there", async () => {
+  // readdir fails identically for missing, is-a-file, and permission-denied. Calling
+  // all three "directory not found" sent the model hunting for a file it had already
+  // located.
+  const ctx = freshCtx();
+  await fs.writeFile(join(ctx.cwd, "notes.md"), "hi");
+  const r = await listDir.execute({ path: "notes.md" }, ctx);
+  assert.equal(r.isError, true);
+  assert.match(r.output, /not a directory, it is a file/);
+  assert.match(r.output, /read_file/, "it should point at the tool that can open it");
+  assert.doesNotMatch(r.output, /not found/, "the file plainly exists");
+
+  const missing = await listDir.execute({ path: "no-such-dir" }, ctx);
+  assert.match(missing.output, /directory not found/);
+});
+
+test("list_dir reports the disk, including what search hides, and says so", async () => {
+  // The one tool that shows the filesystem as it is. glob and grep withhold secrets
+  // and other agents' folders; if list_dir did too, a file could exist, be invisible
+  // to every tool, and the model would conclude it was absent. Showing a NAME is not
+  // permission to open it, which is the line the description has to draw.
+  const ctx = freshCtx();
+  await fs.writeFile(join(ctx.cwd, ".env"), "SECRET=1");
+  await fs.mkdir(join(ctx.cwd, ".claude"));
+  const r = await listDir.execute({}, ctx);
+  assert.match(r.output, /\.env/, "a listing that hides it makes the file undiscoverable");
+  assert.match(r.output, /\.claude\//);
+  // Listed here, still refused by the tool that would disclose the contents.
+  assert.ok(protectedPathReason(join(ctx.cwd, ".env")));
+  assert.match(listDir.description, /read_file still refuses secrets/);
+});
+
+test("a long listing is cut at the real cap and announces it", async () => {
+  const ctx = freshCtx();
+  for (let i = 0; i < MAX_ENTRIES + 5; i++) {
+    await fs.writeFile(join(ctx.cwd, `f${String(i).padStart(4, "0")}.txt`), "x");
+  }
+  const r = await listDir.execute({}, ctx);
+  assert.match(r.output, /… \(5 more\)/, "silent truncation would be a lie about the directory");
+  assert.ok(listDir.description.includes(`after ${MAX_ENTRIES} entries`));
+});
+
 // ── run_command ─────────────────────────────────────────────────────────────
 test("run_command runs a command and returns its output", async () => {
   const ctx = freshCtx();
@@ -348,4 +422,149 @@ test("guard flags catastrophic commands and allows ordinary ones", () => {
   assert.ok(catastrophicCommandReason("mkfs.ext4 /dev/sda"));
   assert.equal(catastrophicCommandReason("npm test"), null);
   assert.equal(catastrophicCommandReason("rm -rf ./build"), null); // local dir is fine
+});
+
+// ── grep's description warns about silent exclusions; they must be real ───────
+// The failure this guards is a wrong CONCLUSION, not a crash: an empty result read as
+// "that string is not in this codebase" when the file was skipped or refused. The
+// model acts on that, so the exclusions have to actually be the ones described.
+
+test("grep really refuses secrets, so 'no matches' there is a refusal not a fact", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mindweave-grepx-"));
+  await fs.writeFile(join(dir, ".env"), "API_TOKEN=supersecret\n");
+  await fs.writeFile(join(dir, "ok.ts"), "const x = 'supersecret';\n");
+  const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+
+  const r = await grepTool.execute({ pattern: "supersecret", output_mode: "files_with_matches" }, ctx);
+  assert.doesNotMatch(r.output, /\.env/, "a secrets file must never be searched");
+  assert.match(r.output, /ok\.ts/, "…but ordinary files still are");
+  assert.match(grepTool.description, /refused rather than missing/i);
+});
+
+test("grep's stated output cap is the real one", () => {
+  // A number in a description that drifts from the constant is a quiet lie.
+  assert.match(grepTool.description, /stops after 250 matching lines/i);
+});
+
+test("grep points at references for named symbols", () => {
+  // Asserts the PROPERTY, not the phrasing. The first version of this test pinned the
+  // exact words "prefer references", and broke the moment that sentence was reworded
+  // to stop overclaiming what references can do. A test that fails on a rewrite of
+  // the same true statement is a test that punishes correcting the text.
+  assert.match(grepTool.description, /\breferences\b/, "grep must name references as the alternative");
+  assert.match(grepTool.description, /symbol you can NAME/i, "…and say when it is the better choice");
+});
+
+// ── glob's description claims, pinned ────────────────────────────────────────
+
+test("glob's stated result cap is the real one", () => {
+  assert.match(globTool.description, /stop after 100 paths/i);
+});
+
+test("glob matches against the ROOT-RELATIVE path, as the description says", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mindweave-globrel-"));
+  await fs.mkdir(join(dir, "src", "deep"), { recursive: true });
+  await fs.writeFile(join(dir, "src", "deep", "a.ts"), "x\n");
+  const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+
+  const hit = await globTool.execute({ pattern: "src/**/*.ts" }, ctx);
+  assert.match(hit.output, /a\.ts/, "a root-relative pattern must match");
+  // A leading slash is an absolute path, which never matches a relative one.
+  const miss = await globTool.execute({ pattern: "/src/**/*.ts" }, ctx);
+  assert.match(miss.output, /No files found/, "a leading slash must not match");
+  assert.match(globTool.description, /RELATIVE to the root/i);
+});
+
+test("glob does NOT list secrets or other agents' data, matching grep and read_file", async () => {
+  // The gap this closes: read_file refused .env, grep refused to search it, and glob
+  // listed it. Listing is a weaker disclosure than reading, but it is the same kind:
+  // it tells the model a secrets file exists and exactly where. A guard that one way
+  // of looking ignores is not a guard.
+  const dir = mkdtempSync(join(tmpdir(), "mindweave-globsec-"));
+  await fs.mkdir(join(dir, "src"), { recursive: true });
+  await fs.writeFile(join(dir, ".env"), "API_TOKEN=x\n");
+  await fs.writeFile(join(dir, "id_rsa"), "key\n");
+  await fs.writeFile(join(dir, "src", "ok.ts"), "export const a = 1;\n");
+  const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+
+  const r = await globTool.execute({ pattern: "**/*" }, ctx);
+  assert.doesNotMatch(r.output, /\.env/, "a secrets file must not be listed");
+  assert.doesNotMatch(r.output, /id_rsa/, "a private key must not be listed");
+  assert.match(r.output, /ok\.ts/, "…while ordinary files still are");
+});
+
+// ── both search engines must honour the same exclusions ──────────────────────
+// grep and glob each have TWO engines: ripgrep when installed, a pure-Node walk when
+// not. Behavioural tests here only reach whichever one this machine has, so on a box
+// without ripgrep the primary path is never executed and a missing exclusion there
+// would pass every test. This scans the source instead, which is checkable either way.
+
+test("grep and glob exclude secrets in BOTH engines, not just the one this machine runs", () => {
+  for (const [name, rel] of [
+    ["grep", "./grep.ts"],
+    ["glob", "./glob.ts"],
+  ] as const) {
+    const src = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+    assert.match(
+      src,
+      /for \(const pattern of SEARCH_EXCLUDE_GLOBS\) args\.push\("-g", `!\$\{pattern\}`\);/,
+      `${name}'s ripgrep path must exclude secrets`,
+    );
+    assert.match(src, /excludedFromSearch\(/, `${name}'s walk path must exclude secrets`);
+  }
+});
+
+// ── ranged reads of a large file ──────────────────────────────────────────────
+// The gap the other two dedups cannot reach. A large file is localized in the working
+// set rather than rendered whole, so it is not in `workingSetFull`; a ranged read is
+// not `full`, so the whole-file dedup cannot fire either. Measured on a real session:
+// app.js read four separate times while its regions sat in <working_files>.
+
+test("a ranged read inside a region already on screen is not re-sent", async () => {
+  const ctx = freshCtx();
+  const p = join(ctx.cwd, "big.ts");
+  await fs.writeFile(p, Array.from({ length: 400 }, (_, i) => `line ${i + 1}`).join("\n"));
+  const st = await fs.stat(p);
+  ctx.reads.set(p, { mtimeMs: st.mtimeMs, size: st.size, full: false, touchedAt: 1 });
+  // What the working set actually rendered this turn.
+  ctx.workingSetSpans = new Map([[p, [{ start: 100, end: 200 }]]]);
+
+  const inside = await readFile.execute({ path: "big.ts", offset: 120, limit: 20 }, ctx);
+  assert.doesNotMatch(inside.output, /line 125/, "the lines were sent again");
+  assert.match(inside.output, /already in your <working_files>/);
+});
+
+test("a ranged read OUTSIDE the rendered region still returns the lines", async () => {
+  const ctx = freshCtx();
+  const p = join(ctx.cwd, "big.ts");
+  await fs.writeFile(p, Array.from({ length: 400 }, (_, i) => `line ${i + 1}`).join("\n"));
+  const st = await fs.stat(p);
+  ctx.reads.set(p, { mtimeMs: st.mtimeMs, size: st.size, full: false, touchedAt: 1 });
+  ctx.workingSetSpans = new Map([[p, [{ start: 100, end: 200 }]]]);
+
+  const outside = await readFile.execute({ path: "big.ts", offset: 300, limit: 10 }, ctx);
+  assert.match(outside.output, /line 305/, "unseen lines must still come back");
+});
+
+test("a ranged read of a CHANGED file is re-sent even if the range was on screen", async () => {
+  const ctx = freshCtx();
+  const p = join(ctx.cwd, "big.ts");
+  await fs.writeFile(p, Array.from({ length: 400 }, (_, i) => `line ${i + 1}`).join("\n"));
+  ctx.reads.set(p, { mtimeMs: 0, size: 0, full: false, touchedAt: 1 }); // stale stat
+  ctx.workingSetSpans = new Map([[p, [{ start: 100, end: 200 }]]]);
+
+  const after = await readFile.execute({ path: "big.ts", offset: 120, limit: 20 }, ctx);
+  assert.match(after.output, /line 125/, "an edited file must come back fresh");
+});
+
+test("with no working set, a ranged read always returns the lines", async () => {
+  // No presence information means no dedup — a wasted read, never a phantom one.
+  const ctx = freshCtx();
+  const p = join(ctx.cwd, "big.ts");
+  await fs.writeFile(p, Array.from({ length: 400 }, (_, i) => `line ${i + 1}`).join("\n"));
+  const st = await fs.stat(p);
+  ctx.reads.set(p, { mtimeMs: st.mtimeMs, size: st.size, full: false, touchedAt: 1 });
+
+  const r = await readFile.execute({ path: "big.ts", offset: 120, limit: 20 }, ctx);
+  assert.match(r.output, /line 125/);
 });

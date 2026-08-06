@@ -177,3 +177,38 @@ test("a second copy of the same command is refused, whatever the command is", { 
   mgr.dispose();
   assert.match(second.output, /already running/i);
 });
+
+// ── the description must not promise what notify does not deliver ─────────────
+// This exact lie was fixed once, in the text handed back when a command is
+// backgrounded, and survived in the tool description. It cannot fail a test by
+// itself: the model simply believes it, tells the user it will report back, and
+// then never does.
+
+test("the description does NOT promise unconditional notification", async () => {
+  const desc = runCommand.description;
+  assert.match(desc, /set by 'notify'/i, "it must point at the parameter that decides");
+  assert.match(desc, /only 'on_finish' reports/i, "and say which mode actually reports");
+  assert.doesNotMatch(
+    desc,
+    /you're told when it finishes|you are told when it finishes/i,
+    "an unconditional promise is false for 'never' and 'on_failure'",
+  );
+});
+
+test("a server backgrounded by default is NOT promised a completion report", async () => {
+  // The case the description used to get wrong: guessNotifyPolicy sends anything
+  // server-shaped to 'on_failure', which reports readiness and never completion.
+  const { c, mgr } = withMgr();
+  const r = await runCommand.execute({ command: "npm run dev", run_in_background: true }, c);
+  mgr.dispose();
+  assert.match(r.output, /will NOT be told when it stops/);
+  assert.doesNotMatch(r.output, /notified AUTOMATICALLY the moment it finishes/);
+});
+
+test("the description no longer claims an inline command can hang the turn", () => {
+  // It cannot: the soft timeout backgrounds it. Saying otherwise scared the model
+  // away from the feature built for exactly that case.
+  const desc = runCommand.description;
+  assert.doesNotMatch(desc, /will hang the turn/i);
+  assert.match(desc, /not hang the turn/i, "the true cost is the wasted timeout, and it is stated");
+});

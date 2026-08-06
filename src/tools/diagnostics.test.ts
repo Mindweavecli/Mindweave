@@ -3,9 +3,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ToolContext } from "./types.js";
+import type { ReadRecord, ToolContext } from "./types.js";
 import type { Chassis, CodeDiagnostic } from "../alternator/chassis/types.js";
-import { diagnosticsTool, formatDiagnostics } from "./diagnostics.js";
+import { MAX_WORKING_SET, diagnosticsTool, formatDiagnostics } from "./diagnostics.js";
 
 function chassisWith(diags: CodeDiagnostic[]): Chassis {
   return {
@@ -51,4 +51,71 @@ test("diagnostics tool with no path falls back to the recent working set", async
   const c = chassisWith([{ file: "/proj/b.ts", line: 1, column: 1, severity: "warning", message: "w" }]);
   const res = await diagnosticsTool.execute({}, ctx(c, ["/proj/b.ts"]));
   assert.match(res.output, /b\.ts:1:1 warning: w/);
+});
+
+// ── What "no diagnostics" is actually worth ──────────────────────────────────
+// The whole point of this tool is to stop the model shipping code it just broke.
+// Every test below exists because some way of NOT noticing the breakage was
+// indistinguishable from a clean file.
+
+/** A chassis that answers per-file, so "which file did it check" is observable. */
+function chassisPerFile(byFile: Record<string, CodeDiagnostic[]>): Chassis {
+  return { ...chassisWith([]), async diagnostics(abs: string) { return byFile[abs] ?? []; } };
+}
+
+test("with no path, the file edited LAST is checked even if it was read first", async () => {
+  // Reproduces a real defect: targets came from Map insertion order, and re-setting an
+  // existing key does not move it. A file read early and edited last kept its old
+  // position, fell outside the window, and the model was told "No diagnostics" about
+  // files it had never looked at while the file it had just broken went unchecked.
+  const reads = new Map<string, ReadRecord>();
+  for (const [i, name] of ["a", "b", "c", "d"].entries()) {
+    reads.set(`/proj/${name}.ts`, { mtimeMs: 0, size: 0, full: true, touchedAt: i + 1 });
+  }
+  // The edit to a.ts: same key, new recency stamp, unchanged Map position.
+  reads.set("/proj/a.ts", { mtimeMs: 0, size: 0, full: true, touchedAt: 99 });
+
+  const c = chassisPerFile({
+    "/proj/a.ts": [{ file: "/proj/a.ts", line: 1, column: 1, severity: "error", message: "broke it" }],
+  });
+  const res = await diagnosticsTool.execute({}, { cwd: "/proj", reads, todos: [], chassis: c } as unknown as ToolContext);
+
+  assert.match(res.output, /a\.ts:1:1 error: broke it/, "the just-edited file was not checked");
+});
+
+test("the no-path window is capped, and the description quotes the real cap", async () => {
+  const reads = new Map<string, ReadRecord>();
+  for (let i = 0; i < MAX_WORKING_SET + 3; i++) {
+    reads.set(`/proj/f${i}.ts`, { mtimeMs: 0, size: 0, full: true, touchedAt: i });
+  }
+  const seen: string[] = [];
+  const c = { ...chassisWith([]), async diagnostics(abs: string) { seen.push(abs); return []; } } as Chassis;
+  await diagnosticsTool.execute({}, { cwd: "/proj", reads, todos: [], chassis: c } as unknown as ToolContext);
+
+  assert.equal(seen.length, MAX_WORKING_SET, "more files were checked than the cap allows");
+  // Files beyond the cap are silently unchecked, so the number has to be stated.
+  assert.ok(
+    diagnosticsTool.description.includes(`only the ${MAX_WORKING_SET} files`),
+    "the description must quote the real cap",
+  );
+});
+
+test("a path that cannot be read is reported exactly like a clean file", async () => {
+  // Not a bug to fix here — the language server returns nothing for an unreadable
+  // file and the tool cannot tell that apart from silence. It IS a claim the
+  // description has to make, because otherwise a typo'd path reads as a pass.
+  const res = await diagnosticsTool.execute({ path: "does/not/exist.ts" }, ctx(chassisWith([])));
+  assert.match(res.output, /No diagnostics/);
+  assert.match(
+    diagnosticsTool.description,
+    /does not exist or cannot be read/i,
+    "the description must say an unreadable path looks clean",
+  );
+});
+
+test("the description warns that a broken CALLER will not be seen", () => {
+  // The costliest false pass: rename a symbol, check the file you edited, get a clean
+  // answer, and the errors are all in files you never named.
+  assert.match(diagnosticsTool.description, /caller/i);
+  assert.match(diagnosticsTool.description, /references/);
 });

@@ -34,7 +34,16 @@ export const saveMemoryTool: Tool = {
     "from routine project work. Do NOT use it for things derivable from the code, git " +
     "history, or MINDWEAVE.md, or for ephemeral task state. Saving is automatic and silent — " +
     "it does NOT prompt the user, so just save and mention it briefly in chat. Saving the " +
-    "same name again updates that memory instead of duplicating it.",
+    "same name again updates that memory instead of duplicating it — names are matched " +
+    "loosely (case and punctuation are ignored, and only the first 60 characters " +
+    "count), so reuse the exact earlier name when you mean to revise one, and pick a " +
+    "name that differs EARLY when you mean a new one. You are told if a save " +
+    "overwrote a differently-named memory.\n" +
+    "Write the body for a stranger, not for this conversation: it is read back with " +
+    "none of the surrounding context, so name the files, commands and decisions in " +
+    "full rather than referring to \"the fix\" or \"what we discussed\". Only the " +
+    "index_line is loaded every session; the body is fetched on demand, so put the " +
+    "detail in the body and keep the hook short.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -87,6 +96,18 @@ export const saveMemoryTool: Tool = {
       body,
       indexLine: indexLine || description,
     });
+    // A name that slugs onto an existing memory's file REPLACES it. That is the one
+    // way saving is destructive, so it is stated rather than reported as an update.
+    if (saved.replaced) {
+      return {
+        output:
+          `Saved memory '${saved.name}', but it OVERWROTE the existing memory ` +
+          `'${saved.replaced}' — both names reduce to the same file (${saved.file}). ` +
+          `If '${saved.replaced}' was still wanted, save it again under a name that ` +
+          `differs within its first 60 characters, and tell the user it was lost.`,
+        summary: `saved '${saved.name}', replaced '${saved.replaced}'`,
+      };
+    }
     return {
       output: saved.updated
         ? `Updated memory '${saved.name}'. It will be available in future sessions.`

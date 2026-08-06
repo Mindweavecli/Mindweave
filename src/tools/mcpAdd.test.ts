@@ -48,6 +48,67 @@ test("it ASKS before writing anything", async () => {
   assert.deepEqual(loaded.map((c) => c.name), ["github"]);
 });
 
+test("replacing an existing server SAYS so before asking, not afterwards", async () => {
+  // "Add this server?" answered yes must not quietly overwrite a working integration
+  // the user already set up. The code knew it was a replacement — it just reported it
+  // once the write had happened.
+  const cwd = project();
+  const ctx = ctxIn(cwd, "yes");
+  await addMcpServer.execute({ name: "github", command: "npx", args: ["-y", "old"] }, ctx);
+  assert.doesNotMatch(ctx.asked[0]!, /REPLACE/, "the first add is not a replacement");
+
+  await addMcpServer.execute({ name: "github", command: "npx", args: ["-y", "new"] }, ctx);
+  assert.match(ctx.asked[1]!, /REPLACE the existing MCP server 'github'/);
+
+  const loaded = parseMcpConfig(await fs.readFile(projectConfigPath(cwd), "utf8"));
+  assert.equal(loaded.length, 1, "still one server, now the new one");
+});
+
+test("the credential PROMPT names the keys and never the values", async () => {
+  // The thing that makes this ask-first-worthy is precisely what the question hid.
+  // Showing a value would also write the secret into the saved transcript, so keys
+  // only — the same line the rest of the codebase draws between naming and printing.
+  const cwd = project();
+  const ctx = ctxIn(cwd, "yes");
+  await addMcpServer.execute(
+    { name: "gh", command: "npx", env: { GITHUB_TOKEN: "ghp_supersecret_value" } },
+    ctx,
+  );
+  assert.match(ctx.asked[0]!, /GITHUB_TOKEN/, "the user must know a credential is being stored");
+  assert.doesNotMatch(ctx.asked[0]!, /ghp_supersecret_value/, "the secret must not reach the screen");
+  assert.match(ctx.asked[0]!, /plain text/);
+});
+
+test("a server with no credentials does not mention storing any", async () => {
+  const cwd = project();
+  const ctx = ctxIn(cwd, "yes");
+  await addMcpServer.execute({ name: "plain", command: "npx" }, ctx);
+  assert.doesNotMatch(ctx.asked[0]!, /plain text/);
+});
+
+test("env values are stored verbatim, and the description says they are not expanded", async () => {
+  // MEASURED: nothing in the MCP layer expands $VAR, and the transport merges the
+  // configured env over the inherited one. The old description told the model to
+  // "reference an environment variable" and showed "$GITHUB_TOKEN", which reaches the
+  // server as those literal characters and fails as a bad credential.
+  const cwd = project();
+  await addMcpServer.execute(
+    { name: "gh", command: "npx", env: { TOKEN: "$FROM_SHELL" } },
+    ctxIn(cwd, "yes"),
+  );
+  const raw = JSON.parse(await fs.readFile(projectConfigPath(cwd), "utf8"));
+  assert.equal(raw.mcpServers.gh.env.TOKEN, "$FROM_SHELL", "stored verbatim — nothing expands it");
+  assert.match(addMcpServer.description, /NOT expanded/);
+  assert.match(addMcpServer.description, /inherits the user's whole environment/);
+});
+
+test("a flag-shaped name is rejected where the cause is knowable", async () => {
+  const cwd = project();
+  const r = await addMcpServer.execute({ name: "--global", command: "npx" }, ctxIn(cwd, "yes"));
+  assert.equal(r.isError, true);
+  assert.match(r.output, /starts with a dash/);
+});
+
 test("declining writes NOTHING", async () => {
   const cwd = project();
   const r = await addMcpServer.execute({ name: "github", command: "npx" }, ctxIn(cwd, "no"));

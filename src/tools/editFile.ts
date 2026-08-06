@@ -32,13 +32,26 @@ import { prepareEditTarget, fail, failQuietly, errText } from "./editTarget.js";
 export const editFile: Tool = {
   name: "edit_file",
   readOnly: false,
+  // The old wording said `old_string` "must match the file's text", which undersold the
+  // matcher in a way that costs real work: matching is tiered, so indentation and line
+  // endings are already forgiven. A model told it needs the exact bytes re-reads whole
+  // files to get them and retries edits that would have applied. What the tiers do NOT
+  // forgive is stated just as plainly, because a matcher that sounds infinitely lenient
+  // invites the sloppy input that makes a wrong-place edit possible. See editCore.ts.
   description:
     "Replace a string in a file with another. This is the DEFAULT editing tool: reach for " +
-    "it whenever you are changing one place in a file. `old_string` must match the file's " +
-    "text and be unique unless `replace_all` is set — include surrounding lines if it isn't. " +
-    "Read the file first. If the SAME file needs changing in several separate places, use " +
-    "multi_edit instead of calling this repeatedly. Use write_file only to create a new file " +
-    "or replace one wholesale.",
+    "it whenever you are changing one place in a file. Read the file first. " +
+    "`old_string` has to identify exactly ONE place, and it is matched on content rather " +
+    "than on formatting: if an exact match is not found, each line is compared with its " +
+    "leading and trailing whitespace ignored, and line endings are normalized on both " +
+    "sides. So you do not need to reproduce a file's exact indentation, and a CRLF file " +
+    "is not a problem. What is never forgiven is a skipped, reordered, or extra line. " +
+    "If `old_string` matches SEVERAL places the file is left untouched and you get the " +
+    "candidate locations back with surrounding context: pick one and include enough " +
+    "nearby lines to make it unique, or set `replace_all` to change every occurrence. " +
+    "If the SAME file needs changing in several separate places, use multi_edit instead " +
+    "of calling this repeatedly. Use write_file only to create a new file or replace one " +
+    "wholesale.",
   parameters: {
     type: "object",
     additionalProperties: false,

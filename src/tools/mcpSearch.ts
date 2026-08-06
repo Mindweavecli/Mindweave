@@ -11,18 +11,26 @@
  * and see every tool directly.
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
-import { renderResults } from "../mcp/deferred.js";
+import { MAX_SEARCH_RESULTS, renderResults } from "../mcp/deferred.js";
 
 export const findMcpTools: Tool = {
   name: "find_mcp_tools",
   readOnly: true,
+  // Two corrections. It searches the WHOLE catalog, not just the unloaded part, so the
+  // old "that aren't already loaded" was simply wrong. And the result cap was invisible
+  // — see the note at the call site for why that one is worse than it sounds.
   description:
-    "Search the MCP tools available in this project that aren't already loaded, and load " +
-    "the matches so you can call them. Use it whenever a task needs an external " +
-    "integration you can't already see a tool for (issue trackers, databases, cloud " +
-    "APIs, docs systems). Query with a server name ('github'), an action ('create " +
-    "issue', 'search'), or a tool name if you know it. Loaded tools stay available for " +
-    "the rest of the session, so search once per capability, not once per call.",
+    "Search this project's MCP tools and load the matches so you can call them. Use it " +
+    "whenever a task needs an external integration you cannot already see a tool for " +
+    "(issue trackers, databases, cloud APIs, docs systems). Query with a server name " +
+    "('github'), an action ('create issue', 'search'), or the exact tool name if you " +
+    "know it — an exact name and a bare server name are both handled specially, so " +
+    "neither is a wasted guess. Matching is on names and descriptions, not meaning: if " +
+    "a sensible term finds nothing, try the server's name on its own before concluding " +
+    `the integration is absent. One search returns at most ${MAX_SEARCH_RESULTS} tools ` +
+    "and tells you when it hit that limit, so a full result is a reason to search again " +
+    "more narrowly rather than to assume you have seen everything. Loaded tools stay " +
+    "available for the rest of the session: search once per capability, not once per call.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -72,10 +80,20 @@ export const findMcpTools: Tool = {
       };
     }
 
+    // A capped search looks exactly like an exhaustive one. That matters more here than
+    // anywhere else: search is the ONLY door to a deferred catalog, so a model that gets
+    // 8 of a server's 40 tools and no hint of the rest concludes the other 32 do not
+    // exist — and they stay hidden AND unactivated. Both sibling MCP listings already
+    // announce their cut; this one did not.
+    const capped =
+      found.length === MAX_SEARCH_RESULTS
+        ? `\n\nThat is the top ${MAX_SEARCH_RESULTS}, which is all one search returns — there may be more. ` +
+          `If what you need is not here, search again with a narrower term or the server's name.`
+        : "";
     return {
       output:
         `Loaded ${found.length} tool${found.length === 1 ? "" : "s"} — you can call ${found.length === 1 ? "it" : "them"} now:\n\n` +
-        `${renderResults(found)}`,
+        `${renderResults(found)}${capped}`,
       summary: `loaded ${found.length} tool${found.length === 1 ? "" : "s"}`,
     };
   },

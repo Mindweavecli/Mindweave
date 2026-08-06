@@ -150,3 +150,37 @@ test("forkSession increments depth and applies read_only", () => {
   assert.equal(child.projectMemory, "MEM");
   assert.equal(child.modelConfig, parent.modelConfig);
 });
+
+// ── spawn_subagent's limits are enforced in code; the text must match ─────────
+// All three were invisible. The step budget one matters most: a paused child looks
+// like a failed child, and the right response (raise max_steps) is the opposite of
+// the instinct (give up, or retry the identical call).
+
+test("a sub-agent cannot spawn a sub-agent, and the description says so", async () => {
+  const ctx = {
+    cwd: process.cwd(),
+    reads: new Map(),
+    todos: [],
+    subagentDepth: 1,
+    forkChild: () => {
+      throw new Error("must not be reached");
+    },
+  } as unknown as ToolContext;
+  const r = await spawnSubagent.execute({ task: "anything" }, ctx);
+  assert.equal(r.isError, true);
+  assert.match(r.output, /cannot spawn another sub-agent/i);
+  assert.match(spawnSubagent.description, /cannot spawn its own children/i);
+});
+
+test("the stated concurrency and budget are the real constants", () => {
+  // Numbers in prose drift from the code they describe unless something checks.
+  assert.match(spawnSubagent.description, /Up to 5 run at once/i);
+  assert.match(spawnSubagent.description, /20 tool rounds by default/i);
+});
+
+test("read_only decides whether a worker may run in parallel", () => {
+  // The parallel claim rests entirely on this predicate.
+  assert.equal(spawnSubagent.isConcurrencySafe?.({ read_only: true }), true);
+  assert.equal(spawnSubagent.isConcurrencySafe?.({ read_only: false }), false);
+  assert.equal(spawnSubagent.isConcurrencySafe?.({}), false, "unset must be the safe default");
+});

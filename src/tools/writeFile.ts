@@ -26,12 +26,25 @@ import { applyEol, dirEol, fileEol } from "./eol.js";
 export const writeFile: Tool = {
   name: "write_file",
   readOnly: false,
+  // Three things this tool does for the model were missing from the description, and
+  // each one is work it would otherwise do by hand or worry about: parent directories
+  // are created, line endings are matched to the project, and the read gate is
+  // satisfied by read_symbol as well as read_file (it checks ctx.reads, not the tool
+  // that filled it). Stated here so the model stops reaching for run_command to mkdir,
+  // and stops trying to hand-match a CRLF project it cannot see the endings of.
   description:
-    "Create a new file, or replace an existing one wholesale. To overwrite an existing file " +
-    "you must read_file it first. Prefer a targeted change to rewriting: use edit_file to " +
-    "change one place in a file, multi_edit for several places in the same file, and this " +
-    "only when the file is new or genuinely being replaced end to end. Rewriting a file to " +
-    "change part of it risks dropping code you didn't mean to touch.",
+    "Create a new file, or replace an existing one wholesale. " +
+    "A new file writes freely, and any missing parent directories are created for you, " +
+    "so you never need to make a directory first. To overwrite a file that ALREADY " +
+    "exists you must have read it this session (read_file or read_symbol both count), " +
+    "which is what stops you clobbering something you never looked at. " +
+    "Line endings are handled for you: an existing file keeps its own, and a new file " +
+    "matches the files around it. Always write plain LF and do not try to match a " +
+    "project's style by hand. " +
+    "Prefer a targeted change to rewriting: use edit_file to change one place in a file, " +
+    "multi_edit for several places in the same file, and this only when the file is new " +
+    "or genuinely being replaced end to end. Rewriting a file to change part of it risks " +
+    "dropping code you didn't mean to touch.",
   parameters: {
     type: "object",
     additionalProperties: false,
