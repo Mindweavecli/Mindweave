@@ -10,7 +10,7 @@ import { promises as fs, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { ToolContext } from "../tools/types.js";
-import { resolvePath, nextTouch } from "../tools/paths.js";
+import { resolvePath, nextTouch, canonicalRoot } from "../tools/paths.js";
 import type { Session, Entry } from "./types.js";
 import { latestSession, listSessions, loadMeta, loadTranscript, loadSessionNotes } from "./store.js";
 import { startChassis } from "../alternator/lane.js";
@@ -170,7 +170,14 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
 }
 
 /** A brand-new session rooted at `cwd` (defaults to the process cwd). */
-export async function createSession(cwd: string = process.cwd()): Promise<Session> {
+export async function createSession(rawCwd: string = process.cwd()): Promise<Session> {
+  // Canonicalise the root ONCE, here, before anything derives from it. run_command
+  // reports where it ended up as a physical path, and on macOS a great deal sits
+  // behind symlinks (/tmp, and all of os.tmpdir()), so a session opened at a logical
+  // path would compare unequal to its own cwd after the first command. See
+  // canonicalRoot. Doing it at the single point of entry is what keeps every root,
+  // every recorded cwd, and every relativized path speaking the same form.
+  const cwd = await canonicalRoot(rawCwd);
   const [projectMemory, memoryIndex, projectContext, governance, modelConfig, earlier] = await Promise.all([
     loadProjectMemory(cwd),
     loadMemory(cwd),

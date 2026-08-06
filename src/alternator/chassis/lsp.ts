@@ -23,7 +23,7 @@ import {
 import { languageIdFor, serverFor, specForLanguage, type ServerSpec } from "./servers.js";
 import type { CodeDiagnostic, SymbolKind } from "./types.js";
 import { flattenDocSymbols, pickNearest, type LineSpan, type RawDocSymbol } from "../../tools/spanCore.js";
-import { killTreeSync } from "../../tools/killTree.js";
+import { killTreeSync, spawnManaged } from "../../tools/killTree.js";
 
 const INIT_TIMEOUT = 15_000;
 const REQUEST_TIMEOUT = 10_000;
@@ -277,15 +277,17 @@ export class LspManager {
    * Kill all language servers. Synchronous, so it also works from a process-exit
    * handler, where Node runs no async work at all.
    *
-   * A shelled server (a Windows `.cmd` shim, which is how npm-installed servers
-   * arrive) is `cmd.exe` and not the server itself, so `proc.kill()` there kills
-   * the wrapper and orphans the real process. Those go through `killTreeSync`.
+   * Always kills the TREE. A shelled server (a Windows `.cmd` shim, which is how
+   * npm-installed servers arrive) is `cmd.exe` rather than the server, so
+   * `proc.kill()` there kills the wrapper and orphans the real process — and off
+   * Windows the same is true of any server launched through `npx` or a venv shim.
+   * Gating this on `shelled` meant macOS and Linux never tree-killed at all.
    */
   dispose(): void {
     this.disposed = true;
-    for (const { proc, shelled } of this.procs) {
+    for (const { proc } of this.procs) {
       try {
-        if (shelled) killTreeSync(proc.pid);
+        killTreeSync(proc.pid);
         proc.kill();
       } catch {
         /* already gone */
@@ -298,10 +300,10 @@ export class LspManager {
   // ── internals ──────────────────────────────────────────────────────────────
 
   /** Kill one server and stop tracking it. */
-  private kill(proc: ChildProcess, shelled: boolean): void {
+  private kill(proc: ChildProcess, _shelled: boolean): void {
     this.procs = this.procs.filter((t) => t.proc !== proc);
     try {
-      if (shelled) killTreeSync(proc.pid);
+      killTreeSync(proc.pid);
       proc.kill();
     } catch {
       /* already gone */
@@ -332,13 +334,13 @@ export class LspManager {
     // directly (recent Node rejects them) — run those through the shell.
     const winShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(spec.command);
     const proc = winShim
-      ? spawn(`"${spec.command}" ${spec.args.join(" ")}`, {
+      ? spawnManaged(`"${spec.command}" ${spec.args.join(" ")}`, [], {
           cwd: this.root,
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
           shell: true,
         })
-      : spawn(spec.command, spec.args, {
+      : spawnManaged(spec.command, spec.args, {
           cwd: this.root,
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,

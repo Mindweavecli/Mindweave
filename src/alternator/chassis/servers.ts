@@ -7,7 +7,7 @@
  * coverage grows; `provision.ts` does the fetching.
  */
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { isExecutableFile } from "../../tools/posixShell.js";
 import { delimiter, extname, join } from "node:path";
 import { ensureInstalled, resolveInstalled, type GithubTarget, type InstallSpec } from "./provision.js";
 
@@ -84,7 +84,10 @@ function findOnPath(names: string[]): string | null {
     for (const dir of dirs) {
       for (const ext of exts) {
         const candidate = join(dir, name + ext.toLowerCase());
-        if (existsSync(candidate)) return candidate;
+        // Executable, not merely present. On POSIX a readable-but-not-executable file
+        // (or a directory) of the right name would satisfy existsSync and then fail to
+        // spawn, which reads as "the language server is broken" rather than "not found".
+        if (isExecutableFile(candidate)) return candidate;
       }
     }
   }

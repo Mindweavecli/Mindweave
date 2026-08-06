@@ -18,8 +18,11 @@
  *  - anti-hang environment: GIT_EDITOR=true and a hidden window stop an
  *    interactive editor or prompt from freezing the turn.
  *
- * The shell is PowerShell on Windows and POSIX sh elsewhere; the system prompt
- * names which, so the model writes commands that will actually run. Deciding
+ * The shell is PowerShell on Windows and bash elsewhere, falling back to `sh` only
+ * on a machine that has no bash (see posixShell.ts — `/bin/sh` is `dash` on Debian
+ * and Ubuntu, where ordinary bash syntax is a hard syntax error). The system prompt
+ * names whichever it resolved to, so the model writes commands that will actually
+ * run, and the label is computed rather than fixed so it cannot go stale. Deciding
  * WHAT to run is the model's job — this tool only executes it, with one
  * mechanical seatbelt (guard.ts) that refuses a handful of catastrophic,
  * irreversible commands.
@@ -33,7 +36,8 @@ import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { catastrophicCommandReason, sensitiveCommandReason } from "./guard.js";
 import { forbiddenCommandReason, forbiddenCommandPatternReason } from "../governor/forbidden.js";
 import { requestForbiddenLift } from "./approval.js";
-import { killTree } from "./killTree.js";
+import { posixShell, shellMismatchNote } from "./posixShell.js";
+import { killTree, spawnManaged } from "./killTree.js";
 import { relativize } from "./paths.js";
 import { outputDetail } from "./detail.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
@@ -52,9 +56,18 @@ const MAX_OUTPUT_CHARS = 30_000;
  *  in runShell: a surviving grandchild can hold the output pipe open forever. */
 const CLOSE_GRACE_MS = 2_000;
 
-/** Human label for the shell, kept in sync with the system prompt. */
+/**
+ * Human label for the shell, kept in sync with the system prompt.
+ *
+ * Reports what will ACTUALLY run, resolved on this machine, rather than a fixed
+ * string. It used to say "the POSIX shell (sh)" everywhere off Windows, which became
+ * a false claim the moment bash was preferred — and a prompt that asserts something
+ * untrue is worse than one that says nothing, because the model believes it and
+ * writes to the wrong dialect.
+ */
 export function commandShellLabel(): string {
-  return IS_WINDOWS ? "Windows PowerShell" : "the POSIX shell (sh)";
+  if (IS_WINDOWS) return "Windows PowerShell";
+  return posixShell().isBash ? "bash" : "a strict POSIX shell (sh)";
 }
 
 export const runCommand: Tool = {
@@ -227,7 +240,7 @@ async function runShell(
   const cwdBefore = ctx.cwd;
 
   const { bin, args, wrapped, tempFile } = buildInvocation(command, cwdFile, shell);
-  const child = spawn(bin, [...args, wrapped], {
+  const child = spawnManaged(bin, [...args, wrapped], {
     cwd: ctx.cwd,
     env: {
       ...process.env,
@@ -235,9 +248,6 @@ async function runShell(
       GIT_PAGER: "cat",
       PAGER: "cat",
     },
-    windowsHide: true,
-    // POSIX: own process group so we can kill the whole tree (timeout / kill_shell).
-    detached: !IS_WINDOWS,
   });
 
   const mgr = ctx.backgroundShells;
@@ -442,12 +452,21 @@ function buildInvocation(
       wrapped,
     };
   }
+  // Prefer bash. `/bin/sh` is `dash` on Debian/Ubuntu, where ordinary bash syntax a
+  // model writes — `[[ ]]`, `source`, arrays — is a hard syntax error. See posixShell.
+  //
+  // `pwd -P` reports the PHYSICAL path, with symlinks resolved. That is deliberate and
+  // it is why `canonicalRoot` exists: macOS puts /tmp and the whole of os.tmpdir()
+  // behind symlinks (/tmp → /private/tmp), so a logical path and a physical one for the
+  // same directory differ constantly. Recording the physical form on both sides is what
+  // keeps them comparable; recording one of each is what silently moved a session off
+  // its own root.
   const wrapped =
     `${command}\n` +
     `__ec=$?\n` +
     `pwd -P > ${shQuote(cwdFile)} 2>/dev/null\n` +
     `exit $__ec`;
-  return { bin: "/bin/sh", args: ["-c"], wrapped };
+  return { bin: posixShell().bin, args: ["-c"], wrapped };
 }
 
 /**
@@ -532,6 +551,14 @@ function format(
   if (IS_WINDOWS && shell === "powershell") {
     const lint = powershellLintReason(command);
     if (lint) parts.push(lint);
+  }
+  // The POSIX mirror of the same idea. Silent on any machine that has bash (nearly
+  // all of them), because there the mismatch cannot arise — it only speaks up on a
+  // minimal box where the command genuinely could not have parsed, and then it names
+  // the construct rather than leaving a bare `dash: syntax error` to be decoded.
+  if (!IS_WINDOWS) {
+    const mismatch = shellMismatchNote(command);
+    if (mismatch) parts.push(mismatch);
   }
 
   const shown = relativize(ctx, ctx.cwd);

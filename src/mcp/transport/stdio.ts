@@ -16,7 +16,7 @@
  *     reason is almost always on stderr and is otherwise lost.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { killTree, killTreeSync } from "../../tools/killTree.js";
+import { killTree, killTreeSync, spawnManaged } from "../../tools/killTree.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS, RpcError, type Notification, type Transport } from "./types.js";
 
 /** How much of the child's stderr to keep for diagnostics. */
@@ -126,15 +126,19 @@ export class StdioTransport implements Transport {
     // `windowsNeedsShell`. POSIX spawns directly, where PATH lookup already works and a
     // shell would only add a quoting surface.
     this.shelled = process.platform === "win32" && windowsNeedsShell(options.command);
+    // spawnManaged, not spawn: on POSIX it makes the server its own process-group
+    // leader, which is what lets `close` take its children down with it. An MCP server
+    // is very often a launcher (`npx`, `uvx`, `pnpm dlx`) whose real work happens in a
+    // grandchild, and those used to survive Mindweave exiting.
     this.proc = this.shelled
-      ? spawn(windowsCommandLine(options.command, args), {
+      ? spawnManaged(windowsCommandLine(options.command, args), [], {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
           shell: true,
           env,
           ...(options.cwd ? { cwd: options.cwd } : {}),
         })
-      : spawn(options.command, args, {
+      : spawnManaged(options.command, args, {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
           env,
@@ -247,13 +251,14 @@ export class StdioTransport implements Transport {
   async close(sync = false): Promise<void> {
     if (!this.disposed) this.die(new Error("mcp transport closed"));
     try {
-      // A shelled child is `cmd.exe`, not the server. Killing it leaves the real server
-      // — a node or python process holding a port, a lock, or an API session — running
-      // after Mindweave exits, which is exactly the orphan the shell tools already use
-      // `killTree` to avoid. POSIX spawns directly, so there is nothing in between.
-      // From a process-exit handler the async spawn never reaches the OS, so that
-      // path has to block instead.
-      if (this.shelled) (sync ? killTreeSync : killTree)(this.proc.pid);
+      // Always kill the TREE, on every platform. A shelled child is `cmd.exe` rather
+      // than the server, so killing the handle leaves the real process running — but
+      // the same is true off Windows whenever the server is a launcher (`npx`, `uvx`)
+      // that does its work in a child. This used to be gated on `shelled`, which is
+      // Windows-only, so on macOS and Linux only the direct child was ever signalled
+      // and its children were orphaned. From a process-exit handler the async path
+      // never reaches the OS, so that case has to block instead.
+      (sync ? killTreeSync : killTree)(this.proc.pid);
       this.proc.kill();
     } catch {
       // Already gone.

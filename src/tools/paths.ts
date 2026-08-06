@@ -13,6 +13,35 @@ import type { ToolContext } from "./types.js";
 import { addFocus } from "./focus.js";
 
 /**
+ * Resolve a directory to its PHYSICAL path, following symlinks.
+ *
+ * Every root and every recorded cwd goes through this once, on the way in, so the
+ * whole session speaks one form of every path.
+ *
+ * Why it has to exist: `run_command` records where a command ended up using
+ * `pwd -P`, which is physical. macOS puts a great deal behind symlinks — `/tmp` is
+ * `/private/tmp`, and `os.tmpdir()` sits under `/private/var` — so a session opened
+ * at a logical path and a cwd read back as a physical one describe the same
+ * directory with different strings. Nothing compares equal after that: the session
+ * appears to have moved on a command that never ran `cd`, and because the recorded
+ * cwd is then no longer under the session root, `relativize` gives up and every path
+ * the model sees turns absolute.
+ *
+ * Canonicalising both sides is the fix, and it belongs here rather than at the call
+ * site: this module is already the one place a path becomes real.
+ *
+ * Degrades to the input when the path cannot be resolved (it may not exist yet), so
+ * this can be applied unconditionally.
+ */
+export async function canonicalRoot(path: string): Promise<string> {
+  try {
+    return await fs.realpath(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
  * The session's roots, primary first. A single-root session is the common case;
  * `/include` adds more (e.g. a backend + a frontend). Falls back to the live cwd
  * when none are set (bare test contexts), so single-root behavior is unchanged.
