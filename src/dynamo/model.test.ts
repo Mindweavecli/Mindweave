@@ -136,3 +136,9 @@ test("save → load roundtrips the config; missing file falls back to default", 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("thinking stays OFF by default — it costs tokens and is the user's call", () => {
+  // Over-narration is fixed by not emitting deliberation (narrationBudget + the prompt
+  // rule), NOT by paying for a reasoning channel to hide it in.
+  assert.equal(DEFAULT_MODEL_CONFIG.thinking, false);
+});

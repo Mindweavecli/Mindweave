@@ -1,60 +1,38 @@
 <h1 align="center">Mindweave</h1>
 
 <p align="center">
-  A fast, model-adaptive, terminal-native AI coding agent. You bring your own key; it does the work.
+  A fast, model-adaptive, terminal-native AI coding agent.<br>
+  You bring your own key. It runs on your machine. Nothing goes anywhere else.
 </p>
 
 <p align="center">
   <a href="https://github.com/mindweave-cli/Mindweave/blob/main/LICENSE">Apache 2.0</a> &nbsp;•&nbsp;
+  <a href="CHANGELOG.md">Changelog</a> &nbsp;•&nbsp;
+  <a href="CONTRIBUTING.md">Contributing</a> &nbsp;•&nbsp;
   <a href="https://github.com/mindweave-cli/Mindweave/stargazers">Stars</a> &nbsp;•&nbsp;
-  <a href="https://x.com/mindweavecli">X (Twitter)</a>
+  <a href="https://x.com/mindweavecli">X</a>
 </p>
 
 ---
 
-## What is Mindweave?
+## What it is
 
-Mindweave is a coding agent that lives in your terminal and works inside your repository: reading, searching, editing, running commands, and checking its own work. It runs **entirely on your machine**. Your code and your API key never touch a Mindweave server.
+Mindweave is a coding agent that lives in your terminal and works inside your
+repository: reading, searching, editing, running commands, and checking its own work.
 
-It is built lean on purpose. Most of a coding agent's context budget goes on scaffolding the model never needed. Mindweave keeps prompts thin and leaves the room for the model to actually reason about your code.
+It runs **entirely on your machine**. There is no backend, no telemetry, and no account.
+Your code and your API key never reach a Mindweave server, because there isn't one.
 
-Bring your own key. Pick your model. It does the work.
+It is built lean on purpose. Most of a coding agent's context budget goes on scaffolding
+the model never needed. Mindweave keeps prompts thin and leaves the room for the model to
+reason about your code.
 
-How the project is run, what gets into the core, and what does not: [PHILOSOPHY.md](PHILOSOPHY.md). It is short, and it is the honest version.
-
-## Coming up: Release 1
-
-Mindweave has been built in the open through the 1.x line, and it is close to the real thing.
-
-The next milestone is the **official release: Mindweave 1**. That is when it lands on npm, installable in one command, with the version numbering reset to match. Release 1 is the first version meant for people who were not watching it get built.
-
-**The new UI is fully designed and lands before then.** It was drawn from scratch rather than borrowed, because a terminal is not a small browser and pretending otherwise is why so many CLI tools feel busy. It is quieter than what ships today, it gets out of the way while the agent works, and it tells you what is happening without asking you to watch. That is all we are saying for now.
-
-Between here and there: no new features. Just real use, and fixing whatever that turns up.
-
-## Features
-
-- **Fully local & BYOK.** Bring your own model API key. No backend, no telemetry, no lock-in.
-- **Model-adaptive drivers.** Each model family gets its own driver so it runs at its best without bloating the core. Only the driver you're using is ever loaded.
-- **Deterministic code intelligence.** A background lane indexes your repo with tree-sitter and language servers (no tokens, no cost) so the agent understands your codebase, not just the open file.
-- **Real tools.** File read/edit, multi-file edits, ripgrep search, shell with background jobs, sub-agents, and diagnostics, with read-before-edit safety and an undo net.
-- **Session memory.** Long sessions stay sharp: automatic compaction plus a continuously-maintained state summary that survives it. The agent can also read its own earlier sessions in a project, so "what did we do last time" gets a real answer.
-- **MCP servers.** Connect external tool servers (GitHub, Postgres, your own) with `/mcp add` or just by asking. They start with your session, and their tools are treated as untrusted by default.
-- **Images.** Drag a screenshot into the prompt, or write `@shot.png`, and a model that can see gets the image itself. On a text-only model it says so plainly instead of pretending.
-- **Per-project governor.** Give a project standing rules, reusable skills, and forbidden paths/commands that the agent must respect.
-- **Interaction modes.** Lightning (auto), Architect (plan-only, read-only), cycled with `shift-tab`.
-
-## Requirements
-
-- **Node.js 20+**
-- A model API key (see below)
-- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) for faster search. Mindweave falls back to a built-in walker if it's not installed.
-
-> **Platforms:** Mindweave is developed and tested primarily on **Windows**. It's built on cross-platform Node and should run on macOS and Linux. If you hit a platform issue there, please open an issue.
+How the project is run, what gets into the core and what does not: [PHILOSOPHY.md](PHILOSOPHY.md).
+It is short, and it is the honest version.
 
 ## Install
 
-Mindweave installs from source:
+Requires **Node.js 20+** and a model API key.
 
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
@@ -64,72 +42,157 @@ npm run build
 npm link          # makes the `mindweave` command available globally
 ```
 
-## Quick start
+Then, in any project:
 
 ```bash
 cd your-project
 mindweave
 ```
 
-On first launch, Mindweave asks for your API key and saves it to `~/.mindweave/.env` so it works in every project. Then just type what you want done.
+On first launch it asks for your API key and saves it to `~/.mindweave/.env`, so it works
+in every project afterwards. Then type what you want done.
+
+Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) makes search faster.
+Without it Mindweave uses a built-in walker.
 
 ### Your key
 
-Mindweave is **bring-your-own-key**. Two providers ship today:
+Two providers ship today. You only need the key for the one you use.
 
 ```
 DEEPSEEK_API_KEY=your-key-here     # deepseek-v4-flash, deepseek-v4-pro
 ANTHROPIC_API_KEY=your-key-here    # claude-sonnet-5, claude-opus-5
 ```
 
-You only need the key for the provider whose models you use. Set both and you can switch between them with `/provider` in the same project. Set a key during the first-run prompt, in `~/.mindweave/.env`, or as an environment variable.
+Set both and you can switch between them in the same project with `/provider`.
 
-## Choosing a provider and model
+## Using it
 
-- `/provider` picks who serves the project, and shows which providers you have a key for.
-- `/model` picks which of that provider's models answers.
-- `/think` picks how hard it reasons.
-- `/help` lists every command.
+| Command | What it does |
+| --- | --- |
+| `/help` | Lists every command |
+| `/provider` | Picks who serves this project |
+| `/model` | Picks which of that provider's models answers |
+| `/think` | Picks how hard it reasons |
+| `/continue` | Resumes an earlier session |
+| `/undo` | Reverts what the last turn changed |
+| `/mcp` | Manages connected MCP servers |
+| `shift-tab` | Cycles interaction modes |
 
-Your choice is remembered per project. See [`src/drivers/PROVIDERS.md`](src/drivers/PROVIDERS.md) for the current model list, and [`src/drivers/README.md`](src/drivers/README.md) if you want to build a driver for another model.
+Your provider and model choice is remembered per project. See
+[`src/drivers/PROVIDERS.md`](src/drivers/PROVIDERS.md) for the model list.
 
-## Connecting MCP servers
+## What it does well
 
-[MCP](https://modelcontextprotocol.io) servers give the agent tools Mindweave does not ship: issue trackers, databases, cloud APIs, internal services.
+**Deterministic code intelligence.** A background lane indexes your repo with tree-sitter
+and language servers, costing no tokens, so the agent understands your codebase rather
+than just the file you opened.
 
-```bash
-/mcp add github npx -y @modelcontextprotocol/server-github --env GITHUB_TOKEN=ghp_x
-```
+**Real tools.** File read and edit, multi-file edits, ripgrep search, a shell with
+background jobs, sub-agents, and compiler diagnostics. Read-before-edit is enforced, and
+`/undo` is a real net rather than a hope.
 
-Or just ask for it in plain words and the agent writes the config. Full guide, including remote servers and how a changed tool description is handled: [docs/MCP.md](docs/MCP.md).
+**Session memory.** Long sessions stay sharp through automatic compaction plus a running
+state summary that survives it. The agent can read its own earlier sessions in a project,
+so "what did we do last time" gets a real answer instead of a guess.
 
-## Roadmap
+**MCP servers.** Connect external tool servers (GitHub, Postgres, your own) with
+`/mcp add` or by asking in plain words. They start with your session, and their output is
+treated as untrusted by default. Full guide: [docs/MCP.md](docs/MCP.md).
 
-Shipped through the 1.x line: the Anthropic driver alongside DeepSeek, providers loaded on demand, sessions the agent can read back, MCP with rug-pull protection, rebuilt editing tools, per-model compaction, background jobs that report when they are up, undo that will not overwrite your own work, and images you can attach and have looked at.
+**Images.** Drag a screenshot into the prompt, or write `@shot.png`. A model that can see
+gets the image. A text-only model says so plainly rather than pretending.
 
-- [x] **v1.9: core hardening.** Every subsystem the agent actually runs, read fresh one at a time rather than trusted because it shipped. Feature freeze starts here.
-- [ ] **Release 1.** The new UI, npm, and the numbering reset.
-- [ ] More model drivers (OpenAI, Qwen, Ollama, and others), community-built.
-- [ ] Verified macOS and Linux support, community-owned.
-- [ ] OAuth for remote MCP servers.
+**Per-project governor.** Give a project standing rules, reusable skills, and forbidden
+paths or commands that the agent has to respect.
+
+**Model-adaptive drivers.** Each model family gets its own driver so it runs at its best
+without bloating the shared core. Only the driver you are using is ever loaded.
+
+## Coming up: Release 1
+
+Mindweave has been built in the open through the 1.x line and is close to the real thing.
+
+The next milestone is the **official release: Mindweave 1**. That is when it lands on npm,
+installable in one command, with the numbering reset to match. Release 1 is the first
+version meant for people who were not watching it get built.
+
+**The new UI is fully designed and lands before then.** It was drawn from scratch rather
+than borrowed, because a terminal is not a small browser and pretending otherwise is why
+so many CLI tools feel busy. It is quieter than what ships today and it gets out of the
+way while the agent works.
+
+Between here and there: no new features. Just real use, and fixing what that turns up.
+Recent releases are exactly that. See the [changelog](CHANGELOG.md).
+
+## Known problems
+
+Written down rather than quietly carried. Several are good places to start if you want to
+contribute, and each links to what it would actually take.
+
+**macOS and Linux are unverified.** Development happens on Windows. Both are believed to
+work and neither has been confirmed by anyone running it in anger. This is the single
+most useful thing an outside contributor can close.
+
+**There is no CI.** Tests are public and nothing runs them on a pull request. A fresh
+clone has no automated signal.
+
+**The test suite is unstable under parallel load.** The tree-sitter grammar tests time out
+when the full suite runs, and the reported test count varies between runs because files
+get starved. Passes reliably when run alone. Wants either a concurrency limit or a longer
+timeout for that file, and it blocks the CI item above.
+
+**The agent explores in more round trips than it needs.** It tends to look things up one
+at a time rather than asking for everything it needs at once, and each round is a full
+model call. Repeated reads of the same content are now caught and refused, so a round
+costs less, but the shape is unchanged. This is partly model behaviour and partly prompt
+work, and it is measurable: `scripts/narration.mjs` reports it against a real session.
+
+**ripgrep's path is not covered by tests.** It is the primary search engine when
+installed, and the test machine does not have it, so only the fallback walker is
+exercised behaviourally.
+
+**MCP has been driven against one real published server.** Tools have been exercised end
+to end; resources and prompts have only been tested against servers written for the
+purpose. Real servers will find edges these did not.
+
+**MCP gaps, deliberately not being worked on right now:** OAuth for remote servers (they
+report `needs-auth` and stop), multi-round tool requests and elicitation, and attaching a
+resource yourself with `@`.
 
 ## Found a bug?
 
-**Please open an issue.** Mindweave is developed by running it on real projects and fixing what breaks, so a reproduction from someone else's setup is genuinely the most useful thing you can send. Nearly every item in the release notes above started as a failure someone watched happen.
+**Please open an issue.** Mindweave is developed by running it on real projects and fixing
+what breaks, so a reproduction from someone else's setup is genuinely the most useful
+thing you can send. Nearly everything in the changelog started as a failure someone
+watched happen.
 
-Useful to include: your OS and terminal, which model you were on, and the steps that led to it. If the agent did something odd rather than crashed, the transcript around it helps more than a description does.
+Useful to include: your OS and terminal, which model you were on, and the steps that led
+to it. If the agent did something odd rather than crashed, the transcript around it helps
+more than a description.
 
 Especially worth reporting:
-- **Anything MCP.** It's still young, and only one real published server has been driven end to end; resources and prompts have only been tested against servers we wrote. Real servers will find edges we didn't.
-- **A tool the agent was offered but couldn't call**, or one it insisted didn't exist.
-- **Anything on macOS or Linux.** Development happens on Windows; those two are believed to work but aren't verified.
-- **A prompt or menu that says something untrue.** Those can't crash and don't fail tests, so they survive until a person notices.
+
+- **Anything on macOS or Linux.**
+- **Anything MCP**, particularly a server that serves resources or prompts.
+- **A tool the agent was offered but could not call**, or one it insisted did not exist.
+- **A prompt or menu that says something untrue.** Those cannot crash and do not fail
+  tests, so they survive until a person notices. Several changelog entries are exactly
+  this.
 
 ## Contributing
 
-Mindweave is open source and contributions are welcome, especially **model drivers**. See the [Contributing Guide](CONTRIBUTING.md), and open an issue or a Discussion to claim a provider.
+Contributions are welcome, especially **model drivers**. OpenAI, Qwen, Ollama and others
+are unclaimed, and a driver is a smaller job than people expect: it owns one provider's
+wire format and nothing about how the agent behaves.
 
-Small fixes and reproduced bugs with a failing test can go straight to a pull request. For anything larger, start a Discussion first. [PHILOSOPHY.md](PHILOSOPHY.md) explains where the two bars sit and what evidence moves the core one, and the guide covers the mechanics.
+Small fixes and reproduced bugs with a failing test can go straight to a pull request. For
+anything larger, start a Discussion first. The [Contributing Guide](CONTRIBUTING.md) has
+the mechanics, [BOUNDARY.md](BOUNDARY.md) answers what belongs in the core versus a
+driver, and [PHILOSOPHY.md](PHILOSOPHY.md) explains where the two bars sit.
+
+AI-assisted contributions are fine. The one rule is that you understand and have tested
+what you are submitting.
 
 ## License
 

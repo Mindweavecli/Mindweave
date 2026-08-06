@@ -147,3 +147,41 @@ test("replace_symbol_body preserves CRLF line endings", async () => {
   assert.ok(after.includes("\r\n"), "CRLF should be preserved");
   assert.doesNotMatch(after, /[^\r]\n/); // no lone LF introduced
 });
+
+// ── read_symbol pays for the same lines twice ─────────────────────────────────
+// Across Claude Code, Cursor and Codex, repeated file reads are ~42% of avoidable
+// token spend. Ours ran through this tool: read_file has always deduped against what
+// the model can still see, read_symbol never did — so a session re-read the same four
+// functions turn after turn while all four sat rendered in <working_files>.
+
+test("a symbol already rendered whole in the working set is not re-sent", async () => {
+  const { ctx, dir } = await project({ "a.ts": "export function alpha() {\n  return 1;\n}\n" });
+  const first = await readSymbolTool.execute({ name: "alpha" }, ctx);
+  assert.match(first.output, /return 1/, "the first read must return the body");
+
+  // The engine sets this each turn from buildWorkingSet: these are the lines actually
+  // rendered into <working_files>. A whole-file block covers the file.
+  ctx.workingSetSpans = new Map([[join(dir, "a.ts"), [{ start: 1, end: 99 }]]]);
+  const again = await readSymbolTool.execute({ name: "alpha" }, ctx);
+  assert.doesNotMatch(again.output, /return 1/, "the body was sent a second time");
+  assert.match(again.output, /already in your <working_files>/);
+});
+
+test("an EDITED file is re-sent even though it is in the working set", async () => {
+  // Staleness beats saving tokens: after an edit the model must see the new text.
+  const { ctx, dir } = await project({ "b.ts": "export function beta() {\n  return 1;\n}\n" });
+  await readSymbolTool.execute({ name: "beta" }, ctx);
+  ctx.workingSetSpans = new Map([[join(dir, "b.ts"), [{ start: 1, end: 99 }]]]);
+
+  await fs.writeFile(join(dir, "b.ts"), "export function beta() {\n  return 2;\n}\n");
+  const after = await readSymbolTool.execute({ name: "beta" }, ctx);
+  assert.match(after.output, /return 2/, "an edited symbol must come back fresh");
+});
+
+test("with no working set (a sub-agent, a test) it always reads", async () => {
+  // No presence information means no dedup — a wasted read, never a phantom one.
+  const { ctx } = await project({ "c.ts": "export function gamma() {\n  return 3;\n}\n" });
+  await readSymbolTool.execute({ name: "gamma" }, ctx);
+  const again = await readSymbolTool.execute({ name: "gamma" }, ctx);
+  assert.match(again.output, /return 3/);
+});

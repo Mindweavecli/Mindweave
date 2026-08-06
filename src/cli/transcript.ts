@@ -96,6 +96,9 @@ export interface TranscriptState {
   seq: number;
   /** The turn's final reply text (recorded into history on the engine side). */
   lastReply: string;
+  /** Has this turn already shown a line of narration? ONE is the budget for a whole
+   *  turn, however many tool calls it takes — see sealAssistant. Reset by `user`. */
+  narrated: boolean;
 }
 
 export type Action =
@@ -118,7 +121,7 @@ export type Action =
   | { type: "say"; text: string }; // an assistant markdown block, NOT recorded as the reply
 
 export function initialState(): TranscriptState {
-  return { committed: [], tail: [], openAsstId: null, raw: "", toolMap: {}, seq: 0, lastReply: "" };
+  return { committed: [], tail: [], openAsstId: null, raw: "", toolMap: {}, seq: 0, lastReply: "", narrated: false };
 }
 
 /** Move the contiguous finished prefix of the tail into committed[]. */
@@ -166,16 +169,56 @@ function closeToolGroup(s: TranscriptState): TranscriptState {
  * if it never produced visible prose. `asReply` records the text as the turn's
  * reply (for history); narration sealed by a following tool is not the reply.
  */
+
+/** Sentences of narration SHOWN between tool calls. */
+export const NARRATION_LINES = 2;
+
+/**
+ * Cut narration to the budget before it reaches the screen.
+ *
+ * This is a DISPLAY cut, and it is the only version of this rule that actually holds.
+ * The prompt asks for two sentences and the engine nudges when it sees more; both are
+ * requests, and a model that is mid-deliberation ignores both — measured, repeatedly,
+ * with the nudge firing and six-paragraph blocks arriving anyway.
+ *
+ * The model still receives its own full text, so nothing about its reasoning changes.
+ * What changes is that the user reads the first two sentences — the finding and the
+ * next step, which is all this position ever carries — instead of the working-out.
+ * The reply that ENDS a turn is never touched: that one is the answer.
+ */
+export function trimNarration(text: string, max = NARRATION_LINES): string {
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  // Sentence ends, plus a blank line or a list bullet — a paragraph break is a
+  // sentence boundary here even when the punctuation says otherwise.
+  const parts = trimmed.split(/(?<=[.!?])\s+|\n{2,}|\n(?=\s*[-*•]|\s*\d+[.)])/);
+  const kept = parts.filter((p) => p.trim()).slice(0, max);
+  return kept.length >= parts.filter((p) => p.trim()).length ? trimmed : kept.join(" ").trim();
+}
 function sealAssistant(s: TranscriptState, asReply: boolean): TranscriptState {
   const id = s.openAsstId;
   if (id == null) return asReply ? { ...s, lastReply: "" } : s;
-  // Let the active driver repair anything its provider leaked into the text
-  // stream (the assembled turn is already clean; live deltas are not).
-  const text = sanitizeStreamText(s.raw);
+  const clean = sanitizeStreamText(s.raw);
+
+  // `asReply` is false exactly when a tool call follows this text, so this is narration
+  // between steps. ONE line of it per TURN, not per call.
+  //
+  // Trimming each block to two sentences fixed the block and not the wall: a turn that
+  // took 23 tool calls still printed 24 blocks, and the same names came round in four
+  // of them ("I have everything I need", then more exploring, then it again). The tool
+  // rows are the progress indicator — they show what is happening, in order, as it
+  // happens. A sentence in front of each one adds nothing the user did not just watch.
+  //
+  // Nothing is lost that matters: anything worth saying survives into the final reply,
+  // which is never suppressed, and the model still receives its own full text.
+  const suppressed = !asReply && s.narrated;
+  const text = asReply ? clean : suppressed ? "" : trimNarration(clean);
+
   let next: TranscriptState = { ...s, openAsstId: null, raw: "" };
   if (text) next = patchTail(next, id, { text, done: true });
   else next = { ...next, tail: next.tail.filter((b) => b.id !== id) };
   if (asReply) next = { ...next, lastReply: text };
+  else if (text) next = { ...next, narrated: true };
   return drain(next);
 }
 
@@ -183,7 +226,8 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
   switch (a.type) {
     case "user": {
       const id = s.seq + 1;
-      return drain({ ...s, seq: id, tail: s.tail.concat({ kind: "user", id, done: true, text: a.text }) });
+      // A new turn: the narration budget refills here and nowhere else.
+      return drain({ ...s, seq: id, narrated: false, tail: s.tail.concat({ kind: "user", id, done: true, text: a.text }) });
     }
     case "token": {
       // Accumulate SILENTLY — the assistant block renders nothing until it seals,

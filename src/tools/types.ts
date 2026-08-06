@@ -269,6 +269,10 @@ export interface ToolContext {
    * — the model already has it, fresh — instead of re-sending it.
    */
   workingSetFull?: Set<string>;
+  /** Line ranges the working-set block actually PUT ON SCREEN this turn, per file.
+   *  Derived from what was rendered (never from the read ledger), so a tool can prove
+   *  the model is already looking at a span instead of assuming it. */
+  workingSetSpans?: Map<string, { start: number; end: number }[]>;
   /**
    * Files whose WHOLE content is still present in the TRANSCRIPT — a full read whose
    * result microcompaction has not cleared to a stub. Derived by the engine each turn

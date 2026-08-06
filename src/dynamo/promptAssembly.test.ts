@@ -125,3 +125,81 @@ test("the harness facts that every provider needs are still present", () => {
   assert.match(sys, /Report what happened honestly/i, "lost the honest-reporting rule");
   assert.match(sys, /Do what was asked, then stop/i, "lost scope discipline (cross-model evidenced)");
 });
+
+// ── The prompt must not lie about what the user can see ───────────────────────
+// Measured on a real session (scripts/narration.mjs): 418 chars of prose per tool
+// call against a 120-260 target, 56% of blocks over the two-sentence rule, one block
+// of 46 sentences, and 10 identifiers re-derived across 3+ blocks. The cause was in
+// the prompt, not the model: it asserted the user could not see tool calls, and then
+// demonstrated "Let me read the file." as the house style. The abstract rule two
+// paragraphs above it ("do not narrate routine steps") lost to the concrete example.
+
+test("the prompt never claims tool calls are invisible to the user", () => {
+  const p = basePrompt("PowerShell");
+  // Both false statements, in the two places they appeared.
+  assert.doesNotMatch(p, /do(es)? NOT see your tool calls/i);
+  assert.doesNotMatch(p, /tool calls are not part of the visible text/i);
+  // And it states the truth, which is what makes "add, don't repeat" make sense.
+  assert.match(p, /SEES every tool call you make/);
+});
+
+test("the prompt does not model narration as the house style", () => {
+  const p = basePrompt("PowerShell");
+  // The literal exemplar that produced ~25 "Let me..." lines in one session.
+  assert.doesNotMatch(p, /"Let me read the file\.?"/);
+});
+
+test("the between-steps budget is stated as a hard rule with an earned exception", () => {
+  const p = basePrompt("PowerShell");
+  assert.match(p, /ONE or TWO sentences/);
+  // A budget with no exception gets ignored the first time it genuinely matters, so
+  // the escape hatch has to exist — and be a TEST the model applies, not a list of
+  // cases. Enumerating cases is the failure BOUNDARY.md already names.
+  assert.match(p, /would act differently for knowing/);
+  assert.match(p, /Length is earned by consequence/);
+});
+
+test("deliberation is directed out of the transcript, and repeats are forbidden", () => {
+  const p = basePrompt("PowerShell");
+  assert.match(p, /thinking does not belong in the transcript/);
+  assert.match(p, /Once you have said what you are going to do, do it/);
+});
+
+test("carrying a fact forward is not a licence to restate results", () => {
+  const p = basePrompt("PowerShell");
+  // The old line said "anything from a tool result you will need later, write into
+  // your reply", which reads as permission to recite output the user is looking at.
+  assert.match(p, /Carry the fact, not the result/);
+});
+
+test("restating the picture so far is forbidden, not just restating a plan", () => {
+  // The rule about plans did not cover FINDINGS. Measured on a live session: the same
+  // "subscriptions and settings are already built" assessment appeared five times and
+  // the status table twice, one full block after each lookup.
+  const p = basePrompt("PowerShell");
+  assert.match(p, /Never re-summarise the picture so far/);
+  assert.match(p, /give the assessment ONCE/);
+});
+
+test("the final reply rules are rendered at the BOUNDARY, not the cached prefix", () => {
+  // Observed: "read the roadmap and tell me what to do" answered with a bold section
+  // label, a status recap nobody asked for, bullets, a numbered list with several
+  // sentences of justification each, six further phases, a digression and two closing
+  // questions. Stating the rule in the system prefix did not survive to turn three.
+  const tail = volatileContext("", "", "", "", false, "");
+  assert.match(tail, /FOUR LINES OR FEWER/);
+  assert.match(tail, /After doing work, just stop/);
+  assert.match(tail, /Ask at most ONE question/);
+  assert.match(tail, /Long is not thorough/);
+  assert.match(tail, /Examples of the right length/, 'a number without examples is the version that lost');
+  assert.doesNotMatch(basePrompt("PowerShell"), /FOUR LINES OR FEWER/);
+});
+
+test("the reply rule forbids appending what was not asked for", () => {
+  // The specific habit: answering the question, then volunteering a correction to an
+  // earlier reply that changes nothing the user would do.
+  assert.match(
+    volatileContext("", "", "", "", false, ""),
+    /Do not append an adjacent topic you noticed/,
+  );
+});

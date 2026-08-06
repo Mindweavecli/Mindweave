@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { initialState, reduce, type Action, type TranscriptState } from "./transcript.js";
+import { initialState, reduce, trimNarration, NARRATION_LINES, type Action, type TranscriptState } from "./transcript.js";
 import { isGroupable } from "./toolDisplay.js";
 
 test("only read-only discovery tools group — edits, writes, runs, tests never do", () => {
@@ -317,4 +317,96 @@ test("note and say commit directly without disturbing a streaming block", () => 
   const done = run([{ type: "say", text: "hello" }]);
   assert.equal(done.committed.length, 1);
   assert.equal(done.committed[0]!.kind, "assistant");
+});
+
+// ── narration is CUT at the display, not merely discouraged ───────────────────
+// The prompt asks for two sentences and the engine nudges past them. Both are
+// requests. Measured live, with both in place: a single question produced six
+// paragraph-length blocks and the nudge fired into a void. The screen is the one
+// place the rule can actually hold, so it holds here.
+
+const ESSAY =
+  "I now have a clear picture of what's next. Let me verify the current state by reading the render layer. " +
+  "The picture: priority #1 is already substantially built and wired through the whole stack. " +
+  "So what's genuinely left is thin. Those are minor.";
+
+test("narration before a tool call is cut to the budget", () => {
+  const s = run([
+    { type: "token", delta: ESSAY },
+    { type: "toolStart", toolId: "1", name: "read_file", arg: "a.ts", action: "read", group: false },
+  ]);
+  const block = [...s.committed, ...s.tail].find((b) => b.kind === "assistant");
+  assert.ok(block && block.kind === "assistant", "no assistant block was committed");
+  assert.ok(block.text.length < ESSAY.length, "the essay reached the screen untouched");
+  assert.equal(block.text, trimNarration(ESSAY));
+  assert.match(block.text, /^I now have a clear picture/, "it keeps the front, which carries the finding");
+  assert.doesNotMatch(block.text, /Those are minor/, "the tail is deliberation");
+});
+
+test("the reply that ENDS a turn is never cut", () => {
+  // That one is the answer to the question. Trimming it would lose real work.
+  const s = run([{ type: "token", delta: ESSAY }, { type: "finishReply" }]);
+  assert.equal((s.committed[0] as { text: string }).text, ESSAY);
+  assert.equal(s.lastReply, ESSAY);
+});
+
+test("narration already within budget is left exactly as written", () => {
+  const short = "Build passed. Running the tests now.";
+  assert.equal(trimNarration(short), short);
+  assert.equal(trimNarration(""), "");
+});
+
+test("the budget is the stated number of sentences", () => {
+  const four = "One thing. Two thing. Three thing. Four thing.";
+  assert.equal(trimNarration(four).split(/(?<=[.!?])\s+/).length, NARRATION_LINES);
+});
+
+test("a turn shows ONE line of narration, not one per tool call", () => {
+  // Measured on a real session AFTER the two-sentence cut was in: 24 prose blocks for
+  // 23 tool calls, and the same identifiers coming round in four of them. Short blocks
+  // are still a wall when there are two dozen of them. The tool rows already show what
+  // is happening; a sentence in front of each adds nothing.
+  const s = run([
+    { type: "user", text: "go" },
+    { type: "token", delta: "Let me read the backend pieces." },
+    { type: "toolStart", toolId: "1", name: "read_file", arg: "a.ts", action: "read", group: false },
+    { type: "toolEnd", toolId: "1", ok: true },
+    { type: "token", delta: "I have everything I need. Now the settings." },
+    { type: "toolStart", toolId: "2", name: "read_file", arg: "b.ts", action: "read", group: false },
+    { type: "toolEnd", toolId: "2", ok: true },
+    { type: "token", delta: "Still need one more thing." },
+    { type: "toolStart", toolId: "3", name: "read_file", arg: "c.ts", action: "read", group: false },
+    { type: "toolEnd", toolId: "3", ok: true },
+  ]);
+  const narration = [...s.committed, ...s.tail].filter((b) => b.kind === "assistant");
+  assert.equal(narration.length, 1, "one line per turn, however many tool calls it takes");
+  assert.match((narration[0] as { text: string }).text, /read the backend pieces/, "the FIRST line is the one kept");
+});
+
+test("the final reply is never suppressed, however much narration came before", () => {
+  const s = run([
+    { type: "user", text: "go" },
+    { type: "token", delta: "Looking." },
+    { type: "toolStart", toolId: "1", name: "read_file", arg: "a.ts", action: "read", group: false },
+    { type: "toolEnd", toolId: "1", ok: true },
+    { type: "token", delta: "Done. The gate was reading Map order instead of recency." },
+    { type: "finishReply" },
+  ]);
+  assert.match(s.lastReply, /Map order instead of recency/);
+});
+
+test("the next turn gets its own narration line", () => {
+  const s = run([
+    { type: "user", text: "first" },
+    { type: "token", delta: "One." },
+    { type: "toolStart", toolId: "1", name: "read_file", arg: "a.ts", action: "read", group: false },
+    { type: "toolEnd", toolId: "1", ok: true },
+    { type: "finishReply" },
+    { type: "user", text: "second" },
+    { type: "token", delta: "Two." },
+    { type: "toolStart", toolId: "2", name: "read_file", arg: "b.ts", action: "read", group: false },
+    { type: "toolEnd", toolId: "2", ok: true },
+  ]);
+  const texts = [...s.committed, ...s.tail].filter((b) => b.kind === "assistant").map((b) => (b as { text: string }).text);
+  assert.deepEqual(texts, ["One.", "Two."], "the budget refills per turn, not per session");
 });

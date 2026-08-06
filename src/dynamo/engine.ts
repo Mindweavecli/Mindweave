@@ -16,7 +16,7 @@
 import { activeDriver, ensureDriver } from "../drivers/registry.js";
 import type { ChatMessage, ImagePart, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
-import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, VERIFY_NUDGE } from "./verify.js";
+import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, narrationFault, narrationNudge, VERIFY_NUDGE } from "./verify.js";
 import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, interpretGuardChoice } from "./guard.js";
 import { findTool, toolSchemas } from "../tools/registry.js";
 import { commandShellLabel } from "../tools/runCommand.js";
@@ -207,8 +207,39 @@ export function volatileContext(
   if (workingFiles) {
     parts.push(`<working_files>\n${workingFiles}\n</working_files>`);
   }
+  parts.push(REPLY_STYLE);
   return parts.join("\n\n");
 }
+
+/**
+ * How to write the message that ENDS a turn. Rebuilt at the boundary every request,
+ * for the same reason the standing rules are: this lived in the cached system prefix
+ * and was reliably ignored by turn three, which is exactly what "a long conversation
+ * buries it" predicts.
+ *
+ * Written against the observed failure, which was NOT mainly length. Asked to read a
+ * roadmap and say what to do next, it answered with a heading, a status recap nobody
+ * requested, four numbered items carrying three sentences of justification each, six
+ * further phases, a design digression, and two closing questions. Rewritten by the
+ * user as plain paragraphs it kept nearly all the content at a third less text — the
+ * bulk was scaffolding, not substance. So the rule leads on SHAPE.
+ */
+const REPLY_STYLE = [
+  "How to write your final reply this turn (the message that ends it, with no tool call):",
+  "<reply_style>",
+  "Match the answer to the question. Finishing a task, confirming something, reporting a result: FOUR LINES OR FEWER, not counting code blocks. That is most turns, and there the budget is hard.",
+  "A question that genuinely asks for an account — what did we do last session, what does this code do, what are the options, why did that break — earns as many plain paragraphs as the answer actually needs. Do not cram a real explanation into one line; the budget exists to stop padding, not to stop answering.",
+  "After doing work, just stop. Do not explain what you did, summarise the changes, or recap where the project stands — the user watched every tool call and can read the diff. Do not append an adjacent topic you noticed, a second recommendation, or a consideration for later. Ask at most ONE question, and only when you genuinely cannot proceed without it.",
+  "Plain prose. No headings, no bullet lists, no bold labels on a short answer — that is a sentence dressed as a document. A list only when the items are genuinely parallel, a table only for real rows and columns.",
+  "Examples of the right length:",
+  "  user: is it built?  →  Yes, dist is current. Go ahead.",
+  "  user: why is the test failing?  →  The fixture passes mtimeMs: 0, so the freshness gate treats the file as stale. Set it from the real stat.",
+  "  user: add the subscription row  →  Added. The spending-cap branch now subtracts subs before the S&P split, which it was not doing.",
+  "And one that earns more, still as plain paragraphs with no headings or bullets:",
+  "  user: what did we build last session?  →  We closed the round-3 audit. The empty src/pages and src/js/modules directories are gone, the subscription-cost logic is deduped into a single getSubscriptionCost in salary.js, and getTaxBracket is wired into calculateSalary instead of the inline copy.\\n\\n  We also added the File → Import Data flow end to end, menu through IPC to storage and a UI refresh. The build passed and import/export was verified by hand.\\n\\n  The open thread is the Subscriptions UI, and whether to settle the ALL to EUR model before touching Settings.",
+  "Long is not thorough. Twice the length is not twice the help; it is the same answer with the reader's time spent on nothing.",
+  "</reply_style>",
+].join("\n");
 
 // The governor's three prompt blocks, pre-rendered to strings ("" when empty so
 // the block is omitted). Built fresh each turn from the session's governance.
@@ -669,6 +700,11 @@ export async function respond(session: Session, options: RespondOptions = {}): P
   // already fired. One reminder per turn: it is a nudge, not a rule to enforce twice.
   const singleEditsByFile = new Map<string, number>();
   let batchEditNudged = false;
+  // Narration budget: one nudge per turn, and the turn's earlier prose to compare against.
+  let narrationNudged = false;
+  const narratedBefore: string[] = [];
+  // Judged next to the prose, pushed after the tool results — see the gate below.
+  let pendingNarrationFault: ReturnType<typeof narrationFault> = null;
   let lastFailSig: string | null = null;
   let lastFailOutput = "";
 
@@ -709,6 +745,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // `workingSetFull` lets read_file short-circuit a re-read of a file already shown.
     const workingSet = await buildWorkingSet(session.toolContext);
     session.toolContext.workingSetFull = workingSet.fullPaths;
+    session.toolContext.workingSetSpans = workingSet.shownSpans;
     // The other half of "what can the model still see": full reads still sitting in the
     // transcript. Derived here, AFTER any compaction above, so it can never disagree
     // with the bytes this step is about to send. This is what makes a stored presence
@@ -776,7 +813,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
       // let it continue — a fact-based reminder, not a decision about the code.
       if (VERIFY_GATE && !planMode && mutatedThisTurn && !verifiedThisTurn && !verifyNudged) {
         verifyNudged = true;
-        session.transcript.push({ role: "user", content: VERIFY_NUDGE });
+        session.transcript.push({ role: "user", content: VERIFY_NUDGE, synthetic: true });
         continue;
       }
       return content;
@@ -792,6 +829,17 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // Durable BEFORE running the tools: if the machine dies mid-tool, the resume path
     // sees these dangling tool_calls and reconciles them (reconcileInterruptedTools).
     await options.persist?.();
+
+    // Narration gate, part one: JUDGE here, where this message's prose and the turn's
+    // earlier prose are both in hand. Do NOT push anything yet — an assistant message
+    // carrying tool_calls must be followed immediately by a tool message per call, and
+    // slipping a nudge in between makes the request invalid (DeepSeek 400: "must be
+    // followed by tool messages responding to each tool_call_id"). The nudge is queued
+    // and pushed after the results land, which is where the other nudges already fire.
+    if (!narrationNudged && content.trim()) {
+      pendingNarrationFault = narrationFault(content, narratedBefore);
+      narratedBefore.push(content);
+    }
 
     // Announce every tool the model chose, in its order, BEFORE running any —
     // the UI's reveal queue paces them and a slow tool (test/run) can show a live
@@ -996,6 +1044,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
             // Only when `cd` has actually moved us — otherwise it's noise.
             cwd: session.toolContext.cwd !== session.cwd ? session.toolContext.cwd : undefined,
           }),
+          synthetic: true,
         });
         await options.persist?.();
       }
@@ -1011,6 +1060,16 @@ export async function respond(session: Session, options: RespondOptions = {}): P
     // not the next — prose biases a choice, it cannot make it hold, and this has to hold
     // on every provider. Nudge once and let the turn continue; nothing is blocked, since
     // the edits themselves are perfectly valid.
+    // Narration gate, part two: the results are in, so the transcript is valid again
+    // and the queued nudge can land. One per turn; nothing is blocked and nothing the
+    // user already read is rewritten behind them.
+    if (!narrationNudged && pendingNarrationFault) {
+      narrationNudged = true;
+      session.transcript.push({ role: "user", content: narrationNudge(pendingNarrationFault), synthetic: true });
+      pendingNarrationFault = null;
+      await options.persist?.();
+    }
+
     if (!batchEditNudged) {
       for (const [path, n] of sameFileEditCounts(
         results.map((r) => ({ name: r.call.name, args: parseArgs(r.call.arguments) })),
@@ -1023,6 +1082,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
         session.transcript.push({
           role: "user",
           content: batchEditNudge(overused, singleEditsByFile.get(overused) ?? 0),
+          synthetic: true,
         });
         await options.persist?.();
       }

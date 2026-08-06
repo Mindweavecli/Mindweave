@@ -28,6 +28,7 @@ import { appendForbidden, appendForbiddenCommand } from "../governor/write.js";
 import { addRoot, removeRoot } from "../tools/workspace.js";
 import { discoverRelatedRoots } from "../tools/workspaceDiscover.js";
 import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
+import { APPROVAL_DISMISSED } from "../tools/approval.js";
 import { parseUndoArg, undoNotice } from "../tools/checkpoints.js";
 import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOf, providerOf, usableFallback, withModel, saveModelConfig } from "../dynamo/model.js";
 import { allProviders, manifestForModel } from "../drivers/registry.js";
@@ -39,7 +40,7 @@ import { versionLabel } from "./version.js";
 import { PromptInput } from "./components/PromptInput.js";
 import { Picker } from "./components/Picker.js";
 import { BlockView } from "./components/BlockView.js";
-import { initialState, reduce, type Action, type Block, type TranscriptState } from "./transcript.js";
+import { initialState, reduce, trimNarration, type Action, type Block, type TranscriptState } from "./transcript.js";
 import { planToolReveal, TOOL_GRACE_MS } from "./reveal.js";
 import { toolDisplay, isGroupable } from "./toolDisplay.js";
 import { summarizeTask, formatTokens, type TaskUsage } from "../dynamo/pricing.js";
@@ -193,13 +194,22 @@ export function App() {
   function showResumed(transcript: Entry[]) {
     for (const e of transcript) {
       if (e.role === "user") {
-        dispatch({ type: "user", text: stripAttachments(e.content) });
+        // Engine nudges ride as `user` messages so the model reads them as instruction,
+        // but they are ours, not the person's. Replaying one draws it as a `>` prompt
+        // the user never typed — seen live as "> That was 3 sentences between tool
+        // calls…" sitting in their own chat history.
+        if (!e.synthetic) dispatch({ type: "user", text: stripAttachments(e.content) });
       } else if (e.role === "summary") {
         dispatch({ type: "note", text: "— resumed; earlier context summarized —" });
       } else if (e.role === "assistant") {
         // Narration came before the tools in the live turn, so seal it first, then
         // re-announce each tool call exactly as streamRespond does.
-        if (e.content.trim()) dispatch({ type: "say", text: e.content });
+        // Same cut as the live path: prose that precedes tool calls is narration,
+        // and a resumed chat must not print the essays the live one trimmed away.
+        if (e.content.trim()) {
+          const intermediate = (e.toolCalls?.length ?? 0) > 0;
+          dispatch({ type: "say", text: intermediate ? trimNarration(e.content) : e.content });
+        }
         for (const call of e.toolCalls ?? []) {
           const d = toolDisplay(call.name, parseToolArgs(call.arguments));
           dispatch({ type: "toolStart", toolId: call.id, name: d.name, arg: d.arg, action: d.kind, group: isGroupable(call.name) });
@@ -869,7 +879,8 @@ export function App() {
   function onOverlayCancel() {
     const o = overlay;
     setOverlay(null);
-    if (o?.kind === "approval") o.resolve(o.options[1] ?? "No"); // Esc = decline
+    // Esc = declined to answer. NOT "chose option 2" — see APPROVAL_DISMISSED.
+    if (o?.kind === "approval") o.resolve(APPROVAL_DISMISSED);
   }
 
   // Hand a free-text directive to the model with an instruction wrapper, as its own

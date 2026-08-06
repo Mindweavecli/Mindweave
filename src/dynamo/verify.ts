@@ -344,3 +344,79 @@ export const VERIFY_NUDGE =
   "works — run the project's build or tests, or call `diagnostics` on the files you touched, and fix anything " +
   "it surfaces. If no check meaningfully applies here (for example a docs or config edit), say so in one line " +
   "and finish. (This reminder fires once per turn.)";
+
+// ── Narration budget ──────────────────────────────────────────────────────────
+// Prose between tool calls is not free: it is written into the transcript and
+// re-sent on every subsequent turn until compaction, so a paragraph restated five
+// times is paid for five times, forever. Measured on a real session before this
+// existed: the same assessment given five times, the same status table twice, one
+// block of 46 sentences, ~10,700 characters of prose in a turn that made no edits.
+//
+// Mechanical rather than only a line in the prompt, for the reason the batching gate
+// gives: prose biases a choice, it cannot make it hold. The prompt states the rule;
+// this catches the turn where the rule slipped and says so while it can still matter.
+
+/** Sentences the model may spend on an intermediate step before it is over budget. */
+export const NARRATION_SENTENCES = 2;
+
+/** Identifiers repeated from earlier prose before it counts as restating. */
+const RESTATE_IDENTS = 3;
+
+/** Rough sentence split for prose (fenced code is not narration). Pure. */
+export function proseSentences(text: string): string[] {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .split(/(?<=[.!?])\s+|\n{2,}|\n(?=[-*\d])/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 1);
+}
+
+/** camelCase / snake_case identifiers named in prose, 4+ chars. Pure. */
+export function proseIdentifiers(text: string): string[] {
+  const found = text.replace(/```[\s\S]*?```/g, " ").match(/\b[A-Za-z_$][A-Za-z0-9_$]*(?:[A-Z][A-Za-z0-9_$]*|_[A-Za-z0-9_$]+)\b/g) ?? [];
+  return [...new Set(found.filter((s) => s.length > 3))];
+}
+
+/**
+ * Why this intermediate message breaks the budget, or null if it is fine (pure).
+ *
+ * Two separate faults, because they need different corrections. LENGTH is an essay
+ * where a line belonged. RESTATING is the worse one and the one a length cap alone
+ * misses: three short blocks that each re-summarise the picture are individually
+ * within budget and collectively the thing that makes a transcript unreadable.
+ * Re-derivation is paraphrased, so matching wording finds nothing — what recurs is
+ * the SUBJECT, which is why this compares identifiers rather than phrases.
+ */
+export function narrationFault(
+  text: string,
+  earlier: readonly string[],
+): { kind: "length" | "restating"; sentences: number; repeated: string[] } | null {
+  const prose = text.trim();
+  if (!prose) return null;
+
+  const seenBefore = new Set(earlier.flatMap((e) => proseIdentifiers(e)));
+  const repeated = proseIdentifiers(prose).filter((id) => seenBefore.has(id));
+  const sentences = proseSentences(prose).length;
+
+  // Restating is checked first: it is the more serious fault and can hold at any length.
+  if (repeated.length >= RESTATE_IDENTS) return { kind: "restating", sentences, repeated };
+  if (sentences > NARRATION_SENTENCES) return { kind: "length", sentences, repeated };
+  return null;
+}
+
+/** The one-shot nudge injected when a turn narrates past its budget. */
+export function narrationNudge(fault: { kind: "length" | "restating"; sentences: number; repeated: string[] }): string {
+  if (fault.kind === "restating") {
+    return (
+      `You have already told the user about ${fault.repeated.slice(0, 4).join(", ")} earlier in this turn. ` +
+      `Do not summarise the picture again — each message should carry only what is NEW since your last one. ` +
+      `Keep gathering silently and give the assessment ONCE, when there is something to conclude. ` +
+      `(This reminder fires once per turn.)`
+    );
+  }
+  return (
+    `That was ${fault.sentences} sentences between tool calls, where the budget is ${NARRATION_SENTENCES}. ` +
+    `The user can see every call you make, so say only what you learned and what you are doing next. ` +
+    `Spend more only when they would act differently for knowing. (This reminder fires once per turn.)`
+  );
+}

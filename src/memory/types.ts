@@ -48,6 +48,12 @@ export type Entry =
        *  array once the turn is old, leaving `content` naming the file so the model
        *  keeps the key to ask for it again. Absent on messages with no images. */
       images?: import("./images.js").ImageRef[];
+      /** True when the engine wrote this, not the person: the verify, batching and
+       *  narration nudges all arrive as `user` messages so the model reads them as
+       *  instruction. They must never be mistaken for something the user typed —
+       *  the session list showed a nudge as the session's `lastPrompt`, so the
+       *  `/continue` picker described a session by a reminder the user never sent. */
+      synthetic?: true;
     }
   | { role: "assistant"; content: string; toolCalls?: ToolCallRecord[] }
   | {

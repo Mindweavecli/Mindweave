@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isFileMutation, mutationNeedsVerification, looksLikeVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, normalizeErrorSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine } from "./verify.js";
+import { isFileMutation, mutationNeedsVerification, looksLikeVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, normalizeErrorSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, narrationFault, narrationNudge, NARRATION_SENTENCES} from "./verify.js";
 
 test("file mutations are the edit/write tools", () => {
   assert.ok(isFileMutation("edit_file"));
@@ -278,4 +278,47 @@ test("firstErrorLine: skips PowerShell's code-echo and caret decoration", () => 
 
 test("firstErrorLine: falls back rather than returning nothing to show", () => {
   assert.equal(firstErrorLine(""), "the same error");
+});
+
+// ── narration budget ──────────────────────────────────────────────────────────
+
+test("an essay between tool calls is over budget", () => {
+  const long =
+    "I have a clear picture now. Let me analyze each item. First the overlap is real. " +
+    "The cleanest fix is one helper. Actually cleaner: keep them separate.";
+  const f = narrationFault(long, []);
+  assert.equal(f?.kind, "length");
+  assert.ok((f?.sentences ?? 0) > NARRATION_SENTENCES);
+  assert.match(narrationNudge(f!), /budget is 2/);
+});
+
+test("restating is caught even when the block is SHORT", () => {
+  // The fault a length cap misses, and the one that made the real session unreadable:
+  // three individually-brief blocks that each re-summarise the same picture.
+  const first = "getActiveSubsCost and getTotalExpenses both compute getSubscriptionCost.";
+  const again = "So getSubscriptionCost, getTotalExpenses and getActiveSubsCost are all wired.";
+  const f = narrationFault(again, [first]);
+  assert.equal(f?.kind, "restating");
+  assert.equal(f?.sentences, 1, "one sentence — a length rule would have passed it");
+  assert.match(narrationNudge(f!), /only what is NEW/);
+});
+
+test("re-derivation is matched on SUBJECT, not wording", () => {
+  // Paraphrase defeats phrase matching: none of these words repeat, the identifiers do.
+  const first = "The overlap sits in getActiveSubsCost, getTotalExpenses and calculateSalary.";
+  const paraphrased = "Looking again: calculateSalary duplicates getTotalExpenses, same as getActiveSubsCost.";
+  assert.equal(narrationFault(paraphrased, [first])?.kind, "restating");
+});
+
+test("a normal step passes untouched", () => {
+  assert.equal(narrationFault("Build passed. Running the tests now.", []), null);
+  assert.equal(narrationFault("", ["anything"]), null);
+});
+
+test("naming the same file twice is not restating", () => {
+  // The threshold has to clear ordinary continuity — mentioning what you are editing
+  // is not a summary. Two shared identifiers stay under it.
+  const first = "Patching runCommand in backgroundShells.";
+  const next = "runCommand is patched; backgroundShells still needs the guard.";
+  assert.equal(narrationFault(next, [first]), null);
 });

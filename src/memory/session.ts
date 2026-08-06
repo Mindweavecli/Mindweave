@@ -159,6 +159,17 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
     readOnlyTools: opts.readOnly === true ? true : p.readOnlyTools,
     // Cleared so the child re-derives its own from the engine when it runs.
     guardAllowAll: p.guardAllowAll,
+    // A child CANNOT reach the user. The spread above inherited the parent's approval
+    // channel, so `ask_user` (which is read-only, and therefore offered even to a
+    // read-only child) put a question on screen from an agent the user never saw start
+    // — and a parallel fan-out could stack several, none of them attributable. It also
+    // made spawn_subagent's own briefing advice false: "write a COMPLETE, standalone
+    // task" only holds if the child truly cannot come back and ask.
+    // Every consumer of this channel already degrades correctly without it: ask_user
+    // tells the child to assume a sensible default and state it, and the guards fail
+    // closed. The child's findings reach the user through its result, where the parent
+    // can weigh them.
+    requestApproval: undefined,
   };
   return {
     ...parent,
@@ -226,6 +237,59 @@ export async function createSession(rawCwd: string = process.cwd()): Promise<Ses
  * state before trusting or repeating it. Pure; returns a new array (unchanged if nothing
  * was dangling). Exported for tests.
  */
+/**
+ * Move anything that got wedged BETWEEN a `tool_calls` message and its results back
+ * out to after them. Pure; returns a new array (unchanged when nothing is stranded).
+ *
+ * Providers require a message carrying `tool_calls` to be followed immediately by one
+ * `tool` message per call. A build of Mindweave briefly appended its narration nudge
+ * the moment it judged the fault — right after the assistant message and before any
+ * result — so sessions written in that window hold a permanently invalid order and
+ * every resume of one dies on the first request:
+ *
+ *   assistant(tool_calls) → user(nudge) → tool → tool        ← rejected
+ *   assistant(tool_calls) → tool → tool → user(nudge)        ← what it should be
+ *
+ * The engine no longer produces this, but a fix that only stops NEW corruption leaves
+ * the already-saved sessions unopenable, and those hold the user's actual work. The
+ * stranded message is MOVED rather than dropped: it may be something the person typed,
+ * and repair is not a licence to lose it.
+ */
+export function repairToolCallOrder(transcript: Entry[]): Entry[] {
+  const out: Entry[] = [];
+  let moved = false;
+  let i = 0;
+
+  while (i < transcript.length) {
+    const entry = transcript[i]!;
+    out.push(entry);
+    i++;
+    if (entry.role !== "assistant" || !entry.toolCalls?.length) continue;
+
+    const owed = new Set(entry.toolCalls.map((c) => c.id));
+    const results: Entry[] = [];
+    const stranded: Entry[] = [];
+    // Walk forward while results are still outstanding, keeping them in order and
+    // setting aside anything that does not belong inside the group. A new assistant
+    // message means the group was abandoned — stop and let reconcile fill the gaps.
+    while (i < transcript.length && owed.size > 0) {
+      const next = transcript[i]!;
+      if (next.role === "assistant") break;
+      if (next.role === "tool" && owed.has(next.toolCallId)) {
+        owed.delete(next.toolCallId);
+        results.push(next);
+      } else {
+        stranded.push(next);
+        moved = true;
+      }
+      i++;
+    }
+    out.push(...results, ...stranded);
+  }
+
+  return moved ? out : transcript;
+}
+
 export function reconcileInterruptedTools(transcript: Entry[]): Entry[] {
   const answered = new Set<string>();
   for (const e of transcript) if (e.role === "tool") answered.add(e.toolCallId);
@@ -267,7 +331,9 @@ export async function resumeSession(
   // A session closed mid-tool (PC shutdown, force-kill) leaves the model's tool_calls
   // with no results — invalid to replay and silent about what didn't finish. Repair it
   // so /continue resumes cleanly and the model re-checks the interrupted step.
-  const transcript = reconcileInterruptedTools(loaded);
+  // Order first, then fill gaps: reconcile inserts results right after their assistant
+  // message, so it must see a group that is already contiguous.
+  const transcript = reconcileInterruptedTools(repairToolCallOrder(loaded));
 
   const [projectMemory, memoryIndex, projectContext, governance, modelConfig, sessionMemory, saved] =
     await Promise.all([

@@ -35,3 +35,15 @@ export function addFocus(
   // Keep the most recent (highest-line) spans when over the cap.
   return merged.slice(-max);
 }
+
+/**
+ * Is [start..end] wholly inside a span the model is already being shown?
+ *
+ * The working set renders a large file's focus regions every turn, so a symbol inside
+ * one of them is already in context and re-sending it pays twice. Checked against the
+ * focus recorded BEFORE this read, and only ever used together with an unchanged-file
+ * check — a stale region is worse than a duplicated one.
+ */
+export function coversSpan(focus: FocusSpan[] | undefined, start: number, end: number): boolean {
+  return (focus ?? []).some((f) => f.start <= start && f.end >= end);
+}

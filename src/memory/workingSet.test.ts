@@ -40,9 +40,9 @@ test("numberedRange numbers an inclusive, clamped slice", () => {
 
 test("renderWorkingFiles keeps within budget and reports full paths", () => {
   const files: PreparedFile[] = [
-    { path: "/p/a.ts", block: "AAA", tokens: 100, full: true },
-    { path: "/p/b.ts", block: "BBB", tokens: 100, full: false },
-    { path: "/p/c.ts", block: "CCC", tokens: 100, full: true },
+    { path: "/p/a.ts", block: "AAA", tokens: 100, full: true, shown: [{ start: 1, end: 9 }] },
+    { path: "/p/b.ts", block: "BBB", tokens: 100, full: false, shown: [{ start: 4, end: 8 }] },
+    { path: "/p/c.ts", block: "CCC", tokens: 100, full: true, shown: [{ start: 1, end: 9 }] },
   ];
   const { text, fullPaths } = renderWorkingFiles(files, 250); // fits 2, evicts 1
   assert.match(text, /AAA/);
@@ -54,7 +54,7 @@ test("renderWorkingFiles keeps within budget and reports full paths", () => {
 });
 
 test("renderWorkingFiles always keeps at least the first file (over budget)", () => {
-  const files: PreparedFile[] = [{ path: "/p/big.ts", block: "X", tokens: 9999, full: true }];
+  const files: PreparedFile[] = [{ path: "/p/big.ts", block: "X", tokens: 9999, full: true, shown: [{ start: 1, end: 1 }] }];
   const { text } = renderWorkingFiles(files, 100);
   assert.match(text, /big\.ts|X/);
 });

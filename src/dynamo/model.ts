@@ -23,7 +23,15 @@ export type { Effort, ModelChoice, ModelConfig, ModelId, ThinkLevel };
 /** The models offered by `/model`, across every installed provider. */
 export const MODELS: ModelChoice[] = allModels();
 
-/** The out-of-the-box choice: the first offered model, no thinking. */
+/**
+ * The out-of-the-box choice: the first offered model, NO thinking.
+ *
+ * Thinking stays off unless the user turns it on with `/think`. It costs reasoning
+ * tokens on every request, and that is the user's call to make, not a default to
+ * inherit. Over-narration is NOT solved by paying for a reasoning channel — it is
+ * solved by not emitting the deliberation at all, which `narrationBudget` enforces
+ * mechanically and the prompt states as a rule.
+ */
 export const DEFAULT_MODEL_CONFIG: ModelConfig = normalizeConfig({
   model: MODELS[0]!.id,
   thinking: false,

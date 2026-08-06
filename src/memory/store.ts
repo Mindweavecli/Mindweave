@@ -70,10 +70,13 @@ function firstUserText(transcript: Entry[]): string {
   return transcript.find((e) => e.role === "user")?.content.trim() ?? "";
 }
 
+/** The last thing the PERSON said. Engine-written nudges arrive as `user` messages so
+ *  the model treats them as instruction, but they are not prompts and must not be
+ *  shown as one — this is what the session picker labels a session with. */
 function lastUserText(transcript: Entry[]): string {
   for (let i = transcript.length - 1; i >= 0; i--) {
     const e = transcript[i];
-    if (e.role === "user") return e.content.trim();
+    if (e.role === "user" && !e.synthetic) return e.content.trim();
   }
   return "";
 }

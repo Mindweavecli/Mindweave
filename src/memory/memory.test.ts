@@ -257,3 +257,63 @@ test("a real summary survives, with its scratchpad removed", () => {
   assert.ok(!out.includes("thinking"));
   assert.ok(out.startsWith("1. Task:"));
 });
+
+test("a session is labelled by what the PERSON said, never by an engine nudge", async () => {
+  // Observed live: the session picker described a session as "That was 3 sentences
+  // between tool calls, where the budget is 2..." — the narration nudge. Nudges arrive
+  // as `user` messages so the model reads them as instruction, which also made them
+  // look like prompts to everything scanning for the last user message.
+  const cwd = "/proj/nudge-label";
+  await saveSession(
+    makeSession(cwd, "sess-nudge", [
+      { role: "user", content: "hello so, where we left last session please" },
+      { role: "assistant", content: "Looking." },
+      { role: "user", content: "That was 3 sentences between tool calls.", synthetic: true },
+    ]),
+  );
+  const [meta] = await listSessions(cwd);
+  assert.equal(meta.lastPrompt, "hello so, where we left last session please");
+  assert.doesNotMatch(meta.lastPrompt, /sentences between tool calls/);
+});
+
+test("a nudge wedged between tool_calls and its results is moved back out", async () => {
+  // Sessions written by one build hold this order permanently. Every resume of one
+  // fails on the first request: "An assistant message with 'tool_calls' must be
+  // followed by tool messages responding to each 'tool_call_id'." Repairing only the
+  // producer leaves the user's saved work unopenable.
+  const { repairToolCallOrder } = await import("./session.js");
+  const broken: Entry[] = [
+    { role: "user", content: "alright, let's do that then please." },
+    { role: "assistant", content: "I'll build it.", toolCalls: [{ id: "a", name: "read_symbol", arguments: "{}" }, { id: "b", name: "read_symbol", arguments: "{}" }] },
+    { role: "user", content: "That was 3 sentences between tool calls.", synthetic: true },
+    { role: "tool", toolCallId: "a", content: "getSubscriptionCost ..." },
+    { role: "tool", toolCallId: "b", content: "getTotalExpenses ..." },
+  ];
+  const fixed = repairToolCallOrder(broken);
+  assert.deepEqual(fixed.map((e) => e.role), ["user", "assistant", "tool", "tool", "user"]);
+  assert.equal(fixed.at(-1)!.content, "That was 3 sentences between tool calls.", "the stranded message was dropped, not moved");
+});
+
+test("repair leaves a healthy transcript exactly as it was", async () => {
+  const { repairToolCallOrder } = await import("./session.js");
+  const healthy: Entry[] = [
+    { role: "user", content: "go" },
+    { role: "assistant", content: "", toolCalls: [{ id: "a", name: "read_file", arguments: "{}" }] },
+    { role: "tool", toolCallId: "a", content: "contents" },
+    { role: "assistant", content: "done" },
+  ];
+  assert.equal(repairToolCallOrder(healthy), healthy, "an untouched transcript should be the same array");
+});
+
+test("repair does not swallow a real user message typed during a tool run", async () => {
+  // The stranded entry may be something the person actually said. Repair moves it.
+  const { repairToolCallOrder } = await import("./session.js");
+  const t: Entry[] = [
+    { role: "assistant", content: "", toolCalls: [{ id: "a", name: "run_command", arguments: "{}" }] },
+    { role: "user", content: "actually stop" },
+    { role: "tool", toolCallId: "a", content: "output" },
+  ];
+  const fixed = repairToolCallOrder(t);
+  assert.deepEqual(fixed.map((e) => e.role), ["assistant", "tool", "user"]);
+  assert.ok(fixed.some((e) => e.content === "actually stop"));
+});

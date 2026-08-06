@@ -171,3 +171,34 @@ test("microcompaction's result is never discarded on a counter nobody remembered
   assert.match(body, /session\.transcript = microcompact\(session\.transcript\)\.entries;/);
   assert.doesNotMatch(body, /cleared > 0 \|\| recapsCleared > 0/, "no counter subset may gate the write");
 });
+
+test("nothing is pushed to the transcript between tool_calls and their results", () => {
+  // A shipped 400 from DeepSeek: "An assistant message with 'tool_calls' must be
+  // followed by tool messages responding to each 'tool_call_id'." The narration nudge
+  // was pushed as a `user` message the moment the fault was judged — which is right
+  // after the assistant's tool_calls and before any result. Every turn that called a
+  // tool failed instantly.
+  //
+  // Pinned structurally because the unit tests around it all passed: they covered the
+  // pure detector and never the transcript SHAPE. Any future nudge judged at that spot
+  // has to queue and land after the results, like the batching and verify nudges do.
+  const start = engineSource.indexOf('push({ role: "assistant", content, toolCalls: records })');
+  assert.ok(start > 0, "the tool_calls append moved — re-anchor this test");
+  const end = engineSource.indexOf("phase: \"start\"", start);
+  assert.ok(end > start, "the tool announcement loop moved — re-anchor this test");
+
+  const between = engineSource.slice(start, end);
+  assert.doesNotMatch(
+    between,
+    /transcript\.push/,
+    "something is appended between tool_calls and the tool results — that request is invalid",
+  );
+});
+
+test("the reply-style rules sit at the BOUNDARY, not in the cached prefix", () => {
+  // They were in the system prompt and were reliably ignored by turn three — the same
+  // burying the standing rules were moved out of the prefix to escape.
+  const promptSource = readFileSync(fileURLToPath(new URL("./prompt.ts", import.meta.url)), "utf8");
+  assert.doesNotMatch(promptSource, /FOUR LINES OR FEWER/, "the rule must not live in the cached prefix");
+  assert.match(engineSource, /parts\.push\(REPLY_STYLE\)/, "it belongs in the volatile tail");
+});

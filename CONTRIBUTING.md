@@ -71,27 +71,72 @@ Before opening an issue, check the existing issues to avoid duplicates. When fil
 
 A word on scope, so nobody wastes an afternoon: **the core is deliberately close to finished.** The default answer to "should this be added" is no. What gets merged readily is a new driver, a reproduced bug with a failing test, or a demonstrated correctness gap. What does not is a feature nobody hit a wall without. A smaller core that does its job well beats a larger one that does more, and every line in the shared engine is paid for by every provider forever.
 
-That is the short version. The full statement of how this project is run, why the core bar is high while the driver bar is low, and exactly what evidence will change our mind about the architecture, is in the [philosophy section of the README](README.md#the-philosophy-a-core-that-stays-still). Read it before proposing anything core-shaped. It is worth knowing up front that we are looking to **replace rather than accumulate**: a proposal that adds a tool and removes nothing has to justify a permanent cost paid by every user on every turn.
+That is the short version. The full statement of how this project is run, why the core bar is high while the driver bar is low, and exactly what evidence will change our mind about the architecture, is in [PHILOSOPHY.md](PHILOSOPHY.md). Read it before proposing anything core-shaped. It is worth knowing up front that we are looking to **replace rather than accumulate**: a proposal that adds a tool and removes nothing has to justify a permanent cost paid by every user on every turn.
 
 ### What we are working on next
 
-**Core hardening.** MCP shipped in v1.3 and v1.4. v1.5 turned to process lifecycle: servers and background jobs that outlived the session, and an interrupt that did not stop queued work. v1.6 continued in the same place, on what a background process reports and when. That is the current focus and it goes on, subsystem by subsystem, through the parts the agent actually runs on every task.
+**Feature freeze, then Release 1.** v1.9.0 closed the core-hardening arc. Since then the
+work has been point releases driven by real use: v1.9.1 audited all 36 tools against their
+implementations, and v1.9.2 fixed how much the agent talks and how often it re-reads
+things it already has. Both are in the [changelog](CHANGELOG.md), and both came out of
+running the agent on an actual project rather than from reading code.
 
-The method is deliberately unglamorous. Take a subsystem that is already shipped and already has passing tests, read it fresh on the assumption it is wrong, and go looking for the failure shapes this project has been bitten by before, which are written down in [BOUNDARY.md](BOUNDARY.md). The last two passes each found real defects in code with hundreds of green tests. Reproductions from your own machine are worth more here than anything else, because most of what turns up only appears when the thing is genuinely run.
+The method is deliberately unglamorous. Take something already shipped with passing tests,
+read it fresh on the assumption it is wrong, and go looking for the failure shapes this
+project has been bitten by before, which are written down in [BOUNDARY.md](BOUNDARY.md).
+Every pass so far has found real defects in code with hundreds of green tests.
+Reproductions from your own machine are worth more here than anything else, because most
+of what turns up only appears when the thing is genuinely run.
 
-Known MCP gaps, which are not being worked on right now:
+### Open problems, if you want one
 
-* **OAuth for remote servers.** Servers needing authorization report `needs-auth` and stop there. The largest remaining MCP piece and the hardest to verify, since it needs a real identity provider to test against.
-* **Multi-round tool requests and elicitation.** A server that needs extra input mid-call cannot ask for it yet.
-* **Resources in the prompt box.** Resources are reachable by the agent but there is no way to attach one yourself with `@`.
+These are real, currently unowned, and roughly ordered by how much they would help. Say so
+in Discussions before starting so work does not collide.
 
-If any of that is where you want to help, say so in Discussions before writing code so the work does not collide.
+* **Verify macOS and Linux.** Development happens on Windows. Both are believed to work
+  and neither has been confirmed by anyone running it on real work. This is the single
+  most useful thing an outside contributor can close, and it needs a user more than it
+  needs a developer.
+* **Add CI.** Tests are public and nothing runs them on a pull request. Blocked in
+  practice by the next item.
+* **Fix the test suite under parallel load.** The tree-sitter grammar tests time out when
+  the full suite runs, and the reported test count varies between runs because files get
+  starved. They pass reliably alone. Wants a concurrency limit or a per-file timeout.
+  Small, self-contained, and it unblocks CI.
+* **Cover the ripgrep search path.** `rg` is the primary engine when installed, and the
+  development machine does not have it, so only the pure-Node fallback is exercised
+  behaviourally. Both engines must agree, including about what they refuse to search.
+* **Reduce exploration round trips.** The agent tends to look things up one at a time
+  rather than requesting everything it needs at once, and each round is a full model call.
+  Repeated reads are now caught and refused, so a round costs less, but the shape is
+  unchanged. Partly model behaviour, partly prompt work.
+  `scripts/narration.mjs` measures it against a real session, so a change here can be
+  shown to have worked rather than argued about.
+* **A model driver.** OpenAI, Qwen, Ollama and others are unclaimed. See the table above.
+
+Known MCP gaps, deliberately not being worked on right now:
+
+* **OAuth for remote servers.** Servers needing authorization report `needs-auth` and stop
+  there. The largest remaining MCP piece and the hardest to verify, since it needs a real
+  identity provider to test against.
+* **Multi-round tool requests and elicitation.** A server that needs extra input mid-call
+  cannot ask for it yet.
+* **Resources in the prompt box.** Resources are reachable by the agent but there is no way
+  to attach one yourself with `@`.
 
 ### Especially useful right now
 
-**MCP has been tested against one real published server and a set of fixtures we wrote.** Tools have been exercised against a real `npx`-launched server end to end; resources and prompts have not, because nothing we could reach exposes them. Real-world servers will find edges we did not: unusual protocol revisions, odd schemas, servers that behave badly on shutdown. A bug report from a real server is more valuable than a feature right now, and one from a server that actually serves resources or prompts is worth more still.
+**MCP has been tested against one real published server and a set of fixtures written for
+the purpose.** Tools have been exercised against a real `npx`-launched server end to end;
+resources and prompts have not, because nothing reachable exposes them. Real servers will
+find edges these did not: unusual protocol revisions, odd schemas, servers that behave
+badly on shutdown. A bug report from a real server is worth more than a feature right now,
+and one from a server that actually serves resources or prompts is worth more still.
 
-The same goes for **macOS and Linux**. Development happens on Windows. Both are believed to work and neither is verified.
+**Anything the agent says that is not true.** A prompt, a menu, or a tool description that
+claims something the code does not do cannot crash and does not fail tests, so it survives
+until a person notices. A large share of v1.9.1 was exactly this, including a tool that
+recommended a credential format that could never have worked.
 
 ### 3. Pull Request (PR) Process
 1. Fork the repository and create your branch from main:

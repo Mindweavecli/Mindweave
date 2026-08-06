@@ -15,7 +15,7 @@ import type { Tool, ToolResult } from "./types.js";
 import { foreignAgentReason, protectedPathReason } from "./guard.js";
 import { requestAgentDataAccess } from "./approval.js";
 import { relativize, resolvePath, nextTouch, touch } from "./paths.js";
-import { addFocus } from "./focus.js";
+import { addFocus, coversSpan } from "./focus.js";
 
 // Caps protect the model's context window, not the disk. They are deliberately
 // MODEL-AGNOSTIC fixed defaults, not derived from any one model's context window —
@@ -44,10 +44,25 @@ const WORKING_SET_HELD =
 export const readFile: Tool = {
   name: "read_file",
   readOnly: true,
+  // The description states the tool's CONTRACT, not just its happy path, because two
+  // of its outcomes are easy to misread as failures and one of its roles is invisible
+  // from here. Every claim below is checked against the behaviour in `execute`; if that
+  // changes, this changes with it.
   description:
     `Read a text file and return its contents with line numbers. Reads up to ` +
     `${MAX_LINES} lines from the start by default; pass \`offset\` (and optionally ` +
-    `\`limit\`) to read a specific range of a longer file.`,
+    `\`limit\`) to read a specific range of a longer file. A file larger than ` +
+    `${Math.round(MAX_BYTES / 1024)} KB must be read with \`limit\` set rather than whole. ` +
+    `Very long output is truncated at the end, and says so. ` +
+    `Reading is also what unlocks editing: edit_file, multi_edit, replace_symbol_body ` +
+    `and overwriting an existing file with write_file all require that file to have ` +
+    `been read this session (read_symbol counts too). ` +
+    `TWO REPLIES MEAN YOU ALREADY HAVE THE FILE and should not read it again: one says ` +
+    `its content is in the <working_files> block, which is kept up to date for you; the ` +
+    `other says it is unchanged since your earlier read in this conversation. Both are ` +
+    `successful reads, and both satisfy the edit requirement above. ` +
+    `When you only want one function, class or type, prefer read_symbol, which returns ` +
+    `just that symbol instead of pulling in a large file to look at a small part of it.`,
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -150,6 +165,26 @@ export const readFile: Tool = {
     // read is bounded, and the model pages with offset for the rest.
     const effectiveLimit = limit ?? MAX_LINES;
     const end = Math.min(totalLines, start - 1 + effectiveLimit);
+
+    // Ranged-read dedup, for the case the two checks above cannot reach: a LARGE file
+    // is not in `workingSetFull` (it is localized to its focus regions rather than
+    // rendered whole), and a ranged read is not `full`, so neither gate fires and the
+    // same lines come back every time they are asked for. Measured on a real session:
+    // `app.js` read four separate times while its regions sat in <working_files>.
+    //
+    // Compared against what the working set actually PUT ON SCREEN this turn, never
+    // against the read ledger — the ledger says what was read once, not what is still
+    // visible, and a sub-agent has no working set at all. Same reasoning as read_symbol.
+    if (!full && unchanged && coversSpan(ctx.workingSetSpans?.get(filePath), start, end)) {
+      touch(ctx, filePath, { start, end });
+      return {
+        output:
+          `${relativize(ctx, filePath)} lines ${start}-${end} are already in your <working_files> ` +
+          `block, unchanged. Read them there rather than requesting them again.`,
+        summary: `read ${relativize(ctx, filePath)} (in working set)`,
+      };
+    }
+
     const slice = allLines.slice(start - 1, end);
 
     // Line numbers, right-aligned to the widest number in the slice.

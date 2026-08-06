@@ -46,6 +46,11 @@ export interface PreparedFile {
   block: string; // the rendered block for this file
   tokens: number;
   full: boolean; // true when the WHOLE current file is included (drives read short-circuit)
+  /** The line ranges this block actually PUTS ON SCREEN. The whole file when `full`,
+   *  otherwise the focus regions localizeBig chose. Derived from what was rendered, so
+   *  a tool can prove the model is already looking at a span rather than assume it from
+   *  the ledger — the ledger records what was read once, not what is visible now. */
+  shown: FocusSpan[];
 }
 
 /** The most-recently-touched files, most-recent first, capped at `max`. Pure. */
@@ -71,7 +76,10 @@ export function numberedRange(lines: string[], from: number, to: number): string
  * first) within a token budget; least-recent overflow is dropped with a note. Returns
  * the text and the set of paths whose FULL content is included. Pure.
  */
-export function renderWorkingFiles(prepared: PreparedFile[], budget: number): { text: string; fullPaths: Set<string> } {
+export function renderWorkingFiles(
+  prepared: PreparedFile[],
+  budget: number,
+): { text: string; fullPaths: Set<string>; shownSpans: Map<string, FocusSpan[]> } {
   const kept: PreparedFile[] = [];
   let used = 0;
   for (const f of prepared) {
@@ -79,7 +87,10 @@ export function renderWorkingFiles(prepared: PreparedFile[], budget: number): { 
     kept.push(f);
     used += f.tokens;
   }
-  if (kept.length === 0) return { text: "", fullPaths: new Set() };
+  // Built from KEPT only: a file prepared and then dropped for budget is not on screen,
+  // and reporting it as visible is the one mistake that matters here.
+  const shownSpans = new Map(kept.map((f) => [f.path, f.shown] as const));
+  if (kept.length === 0) return { text: "", fullPaths: new Set(), shownSpans };
 
   const header =
     "These are the CURRENT contents of the files you're working on, kept up to date " +
@@ -90,7 +101,11 @@ export function renderWorkingFiles(prepared: PreparedFile[], budget: number): { 
     evicted > 0
       ? `\n\n(${evicted} less-recent file${evicted === 1 ? "" : "s"} omitted to stay within budget — read on demand if needed)`
       : "";
-  return { text: `${header}\n\n${body}${note}`, fullPaths: new Set(kept.filter((f) => f.full).map((f) => f.path)) };
+  return {
+    text: `${header}\n\n${body}${note}`,
+    fullPaths: new Set(kept.filter((f) => f.full).map((f) => f.path)),
+    shownSpans,
+  };
 }
 
 /**
@@ -98,7 +113,9 @@ export function renderWorkingFiles(prepared: PreparedFile[], budget: number): { 
  * fresh from disk, keeping the freshest stat on the ledger (so read_file's
  * short-circuit compares correctly), localizing any file too big for its share.
  */
-export async function buildWorkingSet(ctx: ToolContext): Promise<{ text: string; fullPaths: Set<string> }> {
+export async function buildWorkingSet(
+  ctx: ToolContext,
+): Promise<{ text: string; fullPaths: Set<string>; shownSpans: Map<string, FocusSpan[]> }> {
   const active = selectActiveFiles(ctx.reads, WORKING_SET_MAX_CANDIDATES);
   const prepared: PreparedFile[] = [];
   let used = 0;
@@ -135,7 +152,13 @@ export async function buildWorkingSet(ctx: ToolContext): Promise<{ text: string;
     // back to a LOCALIZED block (outline + focused regions) rather than dropping it —
     // this is what makes the cycle identical for small and large tasks.
     if (fullTokens <= PER_FILE_MAX_TOKENS && (firstFile || used + fullTokens <= WORKING_SET_TOKENS)) {
-      prepared.push({ path, block: fullBlock, tokens: fullTokens, full: true });
+      prepared.push({
+        path,
+        block: fullBlock,
+        tokens: fullTokens,
+        full: true,
+        shown: [{ start: 1, end: lines.length }],
+      });
       used += fullTokens;
       continue;
     }
@@ -143,7 +166,18 @@ export async function buildWorkingSet(ctx: ToolContext): Promise<{ text: string;
     const localBlock = await localizeBig(ctx, path, display, lines, record.focus);
     const localTokens = estimateTokens(localBlock);
     if (firstFile || used + localTokens <= WORKING_SET_TOKENS) {
-      prepared.push({ path, block: localBlock, tokens: localTokens, full: false });
+      prepared.push({
+        path,
+        block: localBlock,
+        tokens: localTokens,
+        full: false,
+        // The same ±2 padding localizeBig renders, so what we claim is visible is
+        // exactly what it put on screen.
+        shown: (record.focus ?? []).map((s) => ({
+          start: Math.max(1, s.start - 2),
+          end: Math.min(lines.length, s.end + 2),
+        })),
+      });
       used += localTokens;
     }
     // else: no room even for the localized form — a lower-priority file; skip it.

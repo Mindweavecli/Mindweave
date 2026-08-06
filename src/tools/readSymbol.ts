@@ -14,7 +14,7 @@
 import { promises as fs } from "node:fs";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { relativize, resolvePath, nextTouch } from "./paths.js";
-import { addFocus } from "./focus.js";
+import { addFocus, coversSpan } from "./focus.js";
 import { allChassis, symbolSpans } from "./chassisMux.js";
 import { sliceBody } from "./spanCore.js";
 
@@ -25,11 +25,24 @@ const MAX_SYMBOL_LINES = 400;
 export const readSymbolTool: Tool = {
   name: "read_symbol",
   readOnly: true,
+  // The description told the model to pass `path` for an ambiguous name without saying
+  // what happens if it does not: the tool LISTS the candidates rather than guessing, so
+  // the first call is always safe and is itself the way to disambiguate. It also never
+  // mentioned that this read satisfies the read-before-edit gate, which is the whole
+  // reason it can replace a full read_file before an edit rather than merely precede one.
   description:
-    "Read the full definition of a symbol (function, class, method, type, …) by name — just its " +
-    "lines, not the whole file. Prefer this over read_file when you only need one symbol's code: " +
-    "it avoids pulling a large file to look at a small part of it. Pass `path` to disambiguate a " +
-    "name that is defined in more than one file.",
+    "Read the full definition of a symbol (function, class, method, type, and so on) by " +
+    "name: just its lines, not the whole file. Prefer this over read_file whenever you " +
+    "only need one symbol, since it avoids pulling a large file in to look at a small " +
+    "part of it. " +
+    "THIS COUNTS AS READING THE FILE, so you can edit that symbol straight afterwards " +
+    "without a separate read_file first. " +
+    "If the name is defined in several files it does NOT guess: you get the candidates " +
+    "with their locations, and you pick one with `path`. So calling it without `path` " +
+    "first is safe, and is usually how you find out there was an ambiguity at all. " +
+    `Long symbols stop after ${MAX_SYMBOL_LINES} lines and tell you where to continue ` +
+    "with read_file. Without a language server the match is name-level, and it says so " +
+    "when that is the case.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -102,6 +115,7 @@ export const readSymbolTool: Tool = {
     // Record the read (ranged) so a follow-up edit clears the read-before-edit gate,
     // with recency + the symbol's span as focus (for working-set localization).
     const prior = ctx.reads.get(abs);
+    const unchanged = prior?.mtimeMs === stat.mtimeMs && prior?.size === stat.size;
     ctx.reads.set(abs, {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
@@ -109,6 +123,31 @@ export const readSymbolTool: Tool = {
       touchedAt: nextTouch(),
       focus: addFocus(prior?.focus, { start: span.start, end: span.end }),
     });
+
+    // DEDUP, the same contract read_file has had and this tool never did. Once a file
+    // is in the working set, its content is rebuilt into the volatile tail on EVERY
+    // turn — so re-sending a symbol body the model is already looking at pays for the
+    // same lines twice, every time. Measured across Claude Code, Cursor and Codex,
+    // repeated reads are ~42% of avoidable token spend, and this was our version of it:
+    // a session re-read the same four functions over and over while all four sat in
+    // <working_files>.
+    //
+    // Checked against what the working set actually PUT ON SCREEN this turn, not
+    // against the read ledger. The ledger records what was read once; it does not
+    // prove the text is still visible, and a sub-agent or a headless run has no
+    // working set at all — so trusting it would tell the model "you already have
+    // this" about content it cannot see. A wasted read is cheap; a phantom one makes
+    // the model work from text it never received. Also requires the file to be
+    // UNCHANGED: after an edit the new body has to come back.
+    const alreadyShown = unchanged && coversSpan(ctx.workingSetSpans?.get(abs), span.start, span.end);
+    if (alreadyShown) {
+      return {
+        output:
+          `${span.kind} ${span.name} — ${shown}:${span.start}-${span.end} is already in your ` +
+          `<working_files> block, unchanged. Read it there rather than calling this again.`,
+        summary: `${span.name} (already in context)`,
+      };
+    }
 
     return {
       output: `${span.kind} ${span.name} — ${shown}:${span.start}-${span.end}\n${body}${truncated}${caveat}`,
