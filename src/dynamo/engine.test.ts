@@ -141,3 +141,33 @@ test("the tool list is rebuilt per STEP, so a searched tool is callable at once"
   assert.ok(call, "buildRequest call not found — did the signature change?");
   assert.match(call, /stepTools\(\)/, "each step must send the CURRENT tool list");
 });
+
+test("the summarizer's reply is gated before it can replace the transcript", () => {
+  // Silent when broken: an accepted bad summary looks identical to a good one, and
+  // the conversation it replaced is already gone.
+  const body = engineSource.match(/async function autocompact\([\s\S]*?\n\}/)?.[0];
+  assert.ok(body, "autocompact not found — did it move?");
+  assert.match(body, /usableSummary\(turn\.content, turn\.stop\)/, "the stop reason must be part of the decision");
+  assert.doesNotMatch(body, /const \{ content \}/, "destructuring content alone discards the stop reason");
+});
+
+test("EVERY summarizer rejection counts toward the circuit breaker", () => {
+  // A rejection that doesn't count means a doomed summarizer is called on every step
+  // forever, which is the runaway the breaker exists to stop.
+  const body = engineSource.match(/async function autocompact\([\s\S]*?\n\}/)?.[0];
+  assert.ok(body);
+  // Pin the property, not a count: BOTH ways out — a thrown error and a reply that
+  // came back unusable — have to go through the same failure path.
+  assert.match(body, /if \(!usable\) return void fail\(\);/, "an unusable reply must count as a failure");
+  assert.match(body, /\} catch \{\s*\n\s*return void fail\(\);/, "a thrown error must count as a failure");
+  assert.doesNotMatch(body, /if \(!summary\) return;/, "a bare return skips the breaker");
+});
+
+test("microcompaction's result is never discarded on a counter nobody remembered", () => {
+  // Gating the write on a hand-picked subset meant a pass that only cleared edit inputs
+  // or only evicted images did the work and threw it away.
+  const body = engineSource.match(/if \(used\(\) >= microBar\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(body, "microcompact block not found");
+  assert.match(body, /session\.transcript = microcompact\(session\.transcript\)\.entries;/);
+  assert.doesNotMatch(body, /cleared > 0 \|\| recapsCleared > 0/, "no counter subset may gate the write");
+});

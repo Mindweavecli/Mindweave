@@ -21,6 +21,8 @@ const {
   estimateEntriesTokens,
   microcompact,
   spliceSummary,
+  usableSummary,
+  stripAnalysis,
 } = await import("./compaction.js");
 const { saveSession, loadTranscript, listSessions, latestSession } = await import("./store.js");
 const { createSession, resumeSession, reconcileInterruptedTools } = await import("./session.js");
@@ -216,4 +218,42 @@ test("createSession loads MINDWEAVE.md as project memory when present", async ()
   const s = await createSession(proj);
   assert.match(s.projectMemory, /pnpm/);
   assert.equal(s.transcript.length, 0);
+});
+
+// ── the summarizer reply is UNTRUSTED ─────────────────────────────────────────
+// Replacing the transcript is the most destructive thing the system does. Every one
+// of these was a way to do it with something unusable, silently.
+
+test("a TRUNCATED summary is rejected — half a summary must not replace the session", () => {
+  // The reply looks exactly like a finished one; only `stop` distinguishes them.
+  assert.equal(usableSummary("1. Task: build the cart. 2. Files touched: cart.ts", "truncated"), null);
+});
+
+test("an all-scratchpad summary is rejected, not spliced in as nothing", () => {
+  // The prompt ASKS for <analysis> first, so this is the reply of a model that never
+  // got past thinking. It is non-empty before stripping and empty after, which is how
+  // it used to pass the check and then wipe the transcript to a bare heading.
+  assert.equal(usableSummary("<analysis>let me think about this…</analysis>"), null);
+});
+
+test("an UNCLOSED analysis block does not become the summary", () => {
+  // A cut-off reply leaves an opening tag with no closing one. Everything after it is
+  // thinking, so stripping must drop it rather than keep the scratchpad as the record.
+  const cut = "<analysis>I should start by looking at the cart code and then";
+  assert.equal(stripAnalysis(cut), "");
+  assert.equal(usableSummary(cut), null);
+});
+
+test("empty and trivial replies are rejected", () => {
+  assert.equal(usableSummary(""), null);
+  assert.equal(usableSummary("   \n  "), null);
+  assert.equal(usableSummary("ok"), null);
+});
+
+test("a real summary survives, with its scratchpad removed", () => {
+  const reply = "<analysis>thinking</analysis>\n1. Task: build the shopping cart end to end.\n2. Files: cart.ts";
+  const out = usableSummary(reply);
+  assert.ok(out);
+  assert.ok(!out.includes("thinking"));
+  assert.ok(out.startsWith("1. Task:"));
 });

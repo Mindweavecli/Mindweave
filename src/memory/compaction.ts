@@ -308,9 +308,47 @@ export function formatTranscriptForSummary(entries: Entry[]): string {
     .join("\n\n");
 }
 
-/** Strip the model's <analysis> scratchpad, keeping only the nine sections. */
+/**
+ * Strip the model's <analysis> scratchpad, keeping only the nine sections.
+ *
+ * Handles the UNCLOSED case too, which is what a cut-off reply looks like: an opening
+ * tag with no closing one means the answer stopped mid-scratchpad, so everything from
+ * that tag onward is thinking rather than summary. Without this, a truncated reply
+ * strips to nothing and the model's raw reasoning becomes the record of the session.
+ */
 export function stripAnalysis(summary: string): string {
-  return summary.replace(/<analysis>[\s\S]*?<\/analysis>/g, "").trim();
+  const closed = summary.replace(/<analysis>[\s\S]*?<\/analysis>/g, "");
+  const dangling = closed.indexOf("<analysis>");
+  return (dangling === -1 ? closed : closed.slice(0, dangling)).trim();
+}
+
+/**
+ * Decide whether a summarizer reply may replace the transcript. Returns the usable
+ * summary, or null to reject it. Pure.
+ *
+ * This is the single most destructive operation in the system: it throws away the
+ * conversation and keeps what comes back instead. So the reply is treated as
+ * UNTRUSTED, and every way it can be unusable is checked in one place:
+ *
+ *   - `truncated` — the reply hit the output ceiling mid-summary. It looks exactly
+ *     like a finished one (see StopReason), and accepting it discards the real
+ *     transcript in favour of half a summary.
+ *   - all scratchpad — the prompt asks the model to think inside <analysis> first, so
+ *     a reply that never got past thinking is non-empty before stripping and empty
+ *     after. Checking emptiness on the RAW text let that through, and the transcript
+ *     was replaced with a heading and nothing else.
+ *   - empty or trivial — nothing usable came back.
+ *
+ * Rejecting is always safe: the caller keeps the full transcript and counts a failure.
+ * Compacting late costs tokens; compacting into nothing costs the session.
+ */
+const MIN_SUMMARY_CHARS = 40;
+
+export function usableSummary(content: string, stop?: string): string | null {
+  if (stop === "truncated") return null;
+  const cleaned = stripAnalysis(content);
+  if (cleaned.length < MIN_SUMMARY_CHARS) return null;
+  return cleaned;
 }
 
 /**

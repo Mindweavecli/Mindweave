@@ -41,6 +41,7 @@ import {
   isContinuation,
   microcompact,
   spliceSummary,
+  usableSummary,
 } from "../memory/compaction.js";
 import { autoCompactThreshold, microCompactThreshold, measuredOverhead } from "./contextWindow.js";
 import { renderSessionMemory, shouldUpdateSessionMemory, updateSessionMemory } from "../memory/sessionMemory.js";
@@ -1214,11 +1215,14 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
   const used = () => estimateEntriesTokens(session.transcript) + overhead;
 
   if (used() >= microBar) {
-    const { entries, cleared, recapsCleared } = microcompact(session.transcript);
-    if (cleared > 0 || recapsCleared > 0) {
-      session.transcript = entries;
-      // Silent by design — trimming stale context is background machinery.
-    }
+    // Assigned unconditionally, on purpose. Gating this on a hand-picked subset of the
+    // counters meant a pass that only cleared edit INPUTS or only evicted IMAGES did the
+    // work and then threw the result away, and every new kind of clearing had to
+    // remember to add itself here or be silently discarded. `microcompact` already
+    // returns a copy when it changed nothing, so taking the result always is both
+    // correct and the shape that cannot rot.
+    session.transcript = microcompact(session.transcript).entries;
+    // Silent by design — trimming stale context is background machinery.
   }
   // Circuit-breaker: once autocompact has failed MAX_COMPACT_FAILURES times this
   // session, stop trying (the transcript is likely irrecoverable) rather than burning
@@ -1248,22 +1252,31 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
   // Automatic compaction is silent (background machinery). The user-invoked /compact
   // path shows its own progress line from the command handler.
 
+  const fail = () => {
+    // Keep the full transcript rather than lose it, and count the failure so the
+    // circuit-breaker can stop retrying a doomed compaction. EVERY rejection counts,
+    // not just a thrown error: a summarizer that keeps returning something unusable
+    // burns a model call on every step forever, which is the exact runaway the
+    // breaker exists to stop.
+    session.compactFailures = (session.compactFailures ?? 0) + 1;
+  };
+
   let summary: string;
   try {
     // Summaries don't need reasoning — use the chosen model with thinking off.
-    const { content } = await activeDriver().toolTurn({
+    const turn = await activeDriver().toolTurn({
       system: SUMMARY_SYSTEM_PROMPT,
       messages: [{ role: "user", content: `${formatTranscriptForSummary(session.transcript)}\n\n${SUMMARY_REQUEST}` }],
       model: { ...session.modelConfig, thinking: false },
     });
-    summary = content.trim();
+    // The reply is untrusted: a cut-off or all-scratchpad summary must not be allowed
+    // to replace the conversation. See usableSummary.
+    const usable = usableSummary(turn.content, turn.stop);
+    if (!usable) return void fail();
+    summary = usable;
   } catch {
-    // Summarizer failed — keep the full transcript rather than lose it, and count the
-    // failure so the circuit-breaker can stop retrying a doomed compaction.
-    session.compactFailures = (session.compactFailures ?? 0) + 1;
-    return;
+    return void fail();
   }
-  if (!summary) return;
   session.compactFailures = 0; // a clean compaction resets the breaker
 
   // No explicit post-summary re-read needed: the live working set (buildWorkingSet)
