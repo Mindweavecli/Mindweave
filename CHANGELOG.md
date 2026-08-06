@@ -156,12 +156,20 @@ number is now pinned to the constant it describes, so prose cannot drift from th
 
 ---
 
-## Earlier releases
+## v1.0 to v1.9.0
 
-Release notes for v1.0 through v1.9.0 are on the
-[releases page](https://github.com/mindweave-cli/Mindweave/releases). The short version:
-the Anthropic driver alongside DeepSeek, providers loaded on demand, sessions the agent
-can read back, MCP with protection against changed tool descriptions, rebuilt editing
-tools, per-model compaction, background jobs that report when they are up, undo that will
-not overwrite your own work, images you can attach and have looked at, and POSIX process
-handling.
+This changelog starts at v1.9.1. Earlier versions were released as commits rather than
+tagged releases, so the detail lives in `git log`. What landed across that line:
+
+* **v1.1** the Anthropic driver alongside DeepSeek, and providers loaded on demand
+* **v1.2** sessions the agent can read back, so "what did we do last time" gets a real
+  answer
+* **v1.3, v1.4** MCP, including protection against a server changing a tool's description
+  after you trusted it
+* **v1.5** rebuilt editing tools and per-model compaction
+* **v1.6** background jobs that report when they are actually up, not just when they exit
+* **v1.7** undo that will not overwrite your own edits, and `/provider` split from
+  `/model`
+* **v1.8** images you can attach and have looked at
+* **v1.9.0** core hardening, subsystem by subsystem, and POSIX process handling. Feature
+  freeze starts here.

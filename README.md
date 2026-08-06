@@ -109,6 +109,23 @@ paths or commands that the agent has to respect.
 **Model-adaptive drivers.** Each model family gets its own driver so it runs at its best
 without bloating the shared core. Only the driver you are using is ever loaded.
 
+## Recently
+
+**v1.9.2** cut how much the agent says and how often it re-reads. It was writing a
+paragraph before every tool call, so a turn with twenty lookups printed twenty
+paragraphs of the same plan restated; it now writes one line per turn, and replies match
+the question instead of arriving as a document. It was also re-sending file content that
+was already on screen in front of it, sometimes four times for one file. Both read paths
+now check what is actually rendered before sending anything again.
+
+**v1.9.1** read all 36 tools against their own implementations, one at a time. 21 of the
+findings were code rather than wording: a diagnostics check that reported "no problems"
+about files it never looked at, skill instructions silently corrupted by `$` handling,
+Escape on a question answering it for you, sub-agents putting dialogs on your screen, and
+a tool recommending a credential format that could never have worked.
+
+Full detail in the [changelog](CHANGELOG.md).
+
 ## Coming up: Release 1
 
 Mindweave has been built in the open through the 1.x line and is close to the real thing.
