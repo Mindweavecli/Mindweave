@@ -7,9 +7,28 @@
  * `cd`, and a later read/edit must follow it. Keeping this in one helper means
  * every tool resolves paths the same way.
  */
-import { promises as fs } from "node:fs";
+import { promises as fs, realpath as realpathCb } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { ToolContext } from "./types.js";
+
+/**
+ * The OS's own realpath, not Node's JS reimplementation, and the difference is
+ * load-bearing on Windows.
+ *
+ * `fs.realpath` resolves symlinks but leaves an 8.3 SHORT path exactly as it found
+ * it, so `C:\Users\RUNNER~1\...` and `C:\Users\runneradmin\...` both survive as
+ * distinct strings for one directory. The native call expands short names to their
+ * real on-disk form (and fixes the casing), which is what makes the two comparable.
+ *
+ * This is not exotic: Windows generates a short name for any component over eight
+ * characters, so it happens to every user whose account name is longer than that.
+ * A CI runner (`runneradmin`) hit it immediately while a developer account (`niman`)
+ * never could, which is exactly the kind of difference this function exists to erase.
+ *
+ * There is no `.native` on the promises API, so the callback form is promisified.
+ */
+const realpathNative = promisify(realpathCb.native);
 import { addFocus } from "./focus.js";
 
 /**
@@ -35,7 +54,7 @@ import { addFocus } from "./focus.js";
  */
 export async function canonicalRoot(path: string): Promise<string> {
   try {
-    return await fs.realpath(path);
+    return await realpathNative(path);
   } catch {
     return path;
   }

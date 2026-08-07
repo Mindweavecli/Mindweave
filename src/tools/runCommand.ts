@@ -38,7 +38,7 @@ import { forbiddenCommandReason, forbiddenCommandPatternReason } from "../govern
 import { requestForbiddenLift } from "./approval.js";
 import { posixShell, shellMismatchNote } from "./posixShell.js";
 import { killTree, spawnManaged } from "./killTree.js";
-import { relativize } from "./paths.js";
+import { canonicalRoot, relativize } from "./paths.js";
 import { outputDetail } from "./detail.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
 import { findRunningDuplicate, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
@@ -248,8 +248,13 @@ async function runShell(
   // A unique temp file the wrapped command writes its final cwd into.
   const cwdFile = join(tmpdir(), `mindweave-cwd-${randomBytes(6).toString("hex")}.txt`);
   // Where we stood before the command ran — applyCwd may move ctx.cwd, and the model
-  // needs telling when it does (see cwdChangeNote).
-  const cwdBefore = ctx.cwd;
+  // needs telling when it does (see cwdChangeNote). CANONICALISED, because that
+  // comparison is a string equality and the two sides otherwise come from different
+  // places: this one from the session, the other from whatever form the shell prints.
+  // On Windows those differ for any user whose name is over eight characters, since
+  // one side carries the 8.3 short form, and the session then reports a move on every
+  // command that never left the directory.
+  const cwdBefore = await canonicalRoot(ctx.cwd);
 
   const { bin, args, wrapped, tempFile } = buildInvocation(command, cwdFile, shell);
   const child = spawnManaged(bin, [...args, wrapped], {
@@ -512,7 +517,10 @@ async function applyCwd(cwdFile: string, ctx: ToolContext): Promise<void> {
       // Confirm it's a real directory before adopting — a half-written file or a
       // deleted dir must not strand the session somewhere invalid.
       const stat = await fs.stat(text);
-      if (stat.isDirectory()) ctx.cwd = text;
+      // Canonicalise on the way in, so the session only ever holds ONE form of a
+      // path. The shell prints whatever form it was handed; adopting that verbatim is
+      // how a session ends up describing one directory two ways.
+      if (stat.isDirectory()) ctx.cwd = await canonicalRoot(text);
     }
   } catch {
     // No file / unreadable → command didn't change dir (or failed early); keep cwd.

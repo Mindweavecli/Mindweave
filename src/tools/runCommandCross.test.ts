@@ -17,7 +17,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "./runCommand.js";
@@ -211,4 +211,52 @@ test("the description no longer claims an inline command can hang the turn", () 
   const desc = runCommand.description;
   assert.doesNotMatch(desc, /will hang the turn/i);
   assert.match(desc, /not hang the turn/i, "the true cost is the wasted timeout, and it is stated");
+});
+
+// ── One directory, one string ────────────────────────────────────────────────
+//
+// Windows keeps an 8.3 SHORT alias for any path component over eight characters,
+// so `C:\Users\runneradmin\...` and `C:\Users\RUNNER~1\...` are the same directory
+// under two names. `fs.realpath` (Node's own implementation) resolves symlinks but
+// leaves a short name exactly as it found it, so it does NOT make them comparable;
+// only the OS call does. Sessions compare cwd by string equality, so the mismatch
+// made run_command report a move on commands that never left the directory.
+//
+// This never reproduced on a developer machine because it depends on the ACCOUNT
+// NAME being longer than eight characters. It appeared the first time the suite ran
+// as `runneradmin` on CI.
+
+test("canonicalRoot resolves an 8.3 short path to the same string as the long one", async () => {
+  const { canonicalRoot } = await import("./paths.js");
+  const long = mkdtempSync(join(tmpdir(), "mindweave-shortname-averylongsuffix-"));
+
+  // Ask Windows itself for the short alias. On a volume with 8.3 disabled (and on
+  // every other platform) there is no alias to get, and nothing to assert.
+  let short = long;
+  if (IS_WINDOWS) {
+    const { spawnSync } = await import("node:child_process");
+    const out = spawnSync(
+      "powershell",
+      ["-NoProfile", "-Command", `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${long}').ShortPath`],
+      { encoding: "utf8" },
+    );
+    const line = (out.stdout || "").trim();
+    // Only trust a plausible absolute path that really exists: a shell that fails
+    // in some novel way must skip this test, never fake a pass or a failure.
+    if (/^[A-Za-z]:\\/.test(line) && existsSync(line)) short = line;
+  }
+  if (short === long) return; // no 8.3 alias here, nothing to compare
+
+  assert.equal(
+    await canonicalRoot(short),
+    await canonicalRoot(long),
+    "the short and long spellings of one directory must canonicalise to one string",
+  );
+});
+
+test("canonicalRoot is idempotent, so a path cannot drift between forms", async () => {
+  const { canonicalRoot } = await import("./paths.js");
+  const dir = mkdtempSync(join(tmpdir(), "mindweave-canon-"));
+  const once = await canonicalRoot(dir);
+  assert.equal(await canonicalRoot(once), once);
 });
