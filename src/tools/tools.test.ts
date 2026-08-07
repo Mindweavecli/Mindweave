@@ -505,12 +505,27 @@ test("grep and glob exclude secrets in BOTH engines, not just the one this machi
     ["glob", "./glob.ts"],
   ] as const) {
     const src = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
-    assert.match(
-      src,
-      /for \(const pattern of SEARCH_EXCLUDE_GLOBS\) args\.push\("-g", `!\$\{pattern\}`\);/,
-      `${name}'s ripgrep path must exclude secrets`,
-    );
+    // Name-agnostic: the previous version pinned the loop VARIABLE and broke on a
+    // rename while the behaviour was fine, which is the "asserts a symbol exists
+    // rather than what it does" trap.
+    const excludeLoop = /for \(const \w+ of SEARCH_EXCLUDE_GLOBS\) args\.push\("-g", `!\$\{\w+\}`\);/;
+    assert.match(src, excludeLoop, `${name}'s ripgrep path must exclude secrets`);
     assert.match(src, /excludedFromSearch\(/, `${name}'s walk path must exclude secrets`);
+
+    // ORDER, which is the part that actually failed in the field: ripgrep's `-g`
+    // rules are last-match-wins, so any caller-supplied pattern must be registered
+    // BEFORE the exclusions. With it after, `**/*` cancelled every guard and rg
+    // listed .env and id_rsa. A source check is the only way to pin this on a
+    // machine without rg installed; CI, which has rg, pins it behaviourally.
+    const callerGlob = src.indexOf('args.push("-g", pattern)') >= 0
+      ? src.indexOf('args.push("-g", pattern)')
+      : src.indexOf('args.push("-g", o.glob)');
+    assert.ok(callerGlob >= 0, `${name} should register the caller's glob explicitly`);
+    assert.ok(
+      callerGlob < src.search(excludeLoop),
+      `${name} registers the caller's glob AFTER the exclusions, so rg's last-match-wins ` +
+        `rule lets an ordinary pattern override them`,
+    );
   }
 });
 

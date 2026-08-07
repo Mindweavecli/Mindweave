@@ -53,6 +53,15 @@ export const globTool: Tool = {
     const pattern = typeof args.pattern === "string" ? args.pattern.trim() : "";
     if (!pattern) return fail("`pattern` is required.");
 
+    // Patterns are matched against a ROOT-RELATIVE path, which a leading slash can
+    // never equal. Decided here rather than inside either engine because the two read
+    // it differently: the Node matcher anchors the slash and finds nothing, while
+    // ripgrep treats it as anchored-to-the-search-root and matches. Same call, same
+    // project, two answers, depending only on whether `rg` was installed.
+    if (pattern.startsWith("/")) {
+      return { output: "No files found.", summary: `glob ${pattern} — no matches` };
+    }
+
     const rawPath = typeof args.path === "string" && args.path.trim() ? args.path.trim() : undefined;
     const units = searchUnits(ctx, rawPath);
     const haveRg = await ripgrepAvailable();
@@ -93,6 +102,12 @@ export const globTool: Tool = {
  *  they round-trip across roots (single-root: a plain relative path, unchanged). */
 async function globViaRipgrep(pattern: string, unit: SearchUnit, ctx: ToolContext): Promise<string[]> {
   const args = ["--files", "--hidden", "--path-separator", "/"];
+  // ORDER IS LOAD-BEARING. ripgrep's `-g` rules are last-match-wins, exactly like
+  // .gitignore, so the caller's pattern MUST come first and the exclusions after it.
+  // With the exclusions first, a pattern as ordinary as `**/*` matched last and
+  // overrode every one of them, and `rg --files --hidden` then listed `.env` and
+  // `id_rsa` outright. MEASURED both ways against a real rg before changing this.
+  args.push("-g", pattern);
   for (const dir of DEFAULT_IGNORES) args.push("-g", `!${dir}`);
   // `--hidden` makes ripgrep descend into dot-directories, which is exactly where
   // secrets and other agents' saved sessions live. grep has always excluded them, on
@@ -100,8 +115,8 @@ async function globViaRipgrep(pattern: string, unit: SearchUnit, ctx: ToolContex
   // Listing a path is a weaker disclosure than printing its contents, but it is the
   // same disclosure in kind: it tells the model a secrets file exists and where. The
   // guard is only meaningful if every way of looking respects it.
-  for (const pattern of SEARCH_EXCLUDE_GLOBS) args.push("-g", `!${pattern}`);
-  args.push("-g", pattern, "--", unit.sub || ".");
+  for (const excluded of SEARCH_EXCLUDE_GLOBS) args.push("-g", `!${excluded}`);
+  args.push("--", unit.sub || ".");
   const res = await runRipgrep(args, unit.root);
   if (res.code !== 0 && res.code !== 1) return globViaWalk(pattern, unit, ctx); // fall back on rg failure
   return res.lines.map((line) => relativize(ctx, join(unit.root, line)));

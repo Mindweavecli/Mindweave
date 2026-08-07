@@ -155,6 +155,10 @@ function formatGrep(mode: Mode, pattern: string, lines: string[]): ToolResult {
 // ── ripgrep path (primary) ────────────────────────────────────────────────────
 async function grepViaRipgrep(o: GrepOpts): Promise<UnitResult> {
   const args: string[] = ["--hidden", "--path-separator", "/"];
+  // ORDER IS LOAD-BEARING: ripgrep's `-g` rules are last-match-wins. The caller's own
+  // glob therefore has to be registered BEFORE the exclusions, or a filter as ordinary
+  // as `**/*` matches last and cancels every guard below it.
+  if (o.glob) args.push("-g", o.glob);
   // Skip the same noise directories the walk does, regardless of .gitignore.
   for (const dir of DEFAULT_IGNORES) args.push("-g", `!${dir}`);
   // `--hidden` above means ripgrep would otherwise descend into dot-directories,
@@ -169,7 +173,6 @@ async function grepViaRipgrep(o: GrepOpts): Promise<UnitResult> {
     args.push("-n", "--max-columns", "500");
     if (o.context > 0) args.push("-C", String(o.context));
   }
-  if (o.glob) args.push("-g", o.glob);
   args.push("-e", o.pattern);
   // Run FROM the unit's root so emitted paths are root-relative; we label them below.
   args.push("--", o.unit.sub || ".");
@@ -184,8 +187,12 @@ async function grepViaRipgrep(o: GrepOpts): Promise<UnitResult> {
   }
   // Multi-root: prefix the root label so every path round-trips (a `--` group
   // separator is left alone). Single-root: the lines are already cwd-relative.
+  // Searching `.` makes ripgrep emit `./a.txt`, so labelling produced `rootA/./a.txt`
+  // and the path no longer round-tripped back to a root. The walk path never had the
+  // `./`, so the two engines also printed different paths for the same hit.
   const prefix = isMultiRoot(o.ctx) ? `${rootLabel(rootsOf(o.ctx), o.unit.root)}/` : "";
-  const lines = prefix ? res.lines.map((l) => (l === "--" ? l : prefix + l)) : res.lines;
+  const clean = res.lines.map((l) => (l === "--" ? l : l.replace(/^\.\//, "")));
+  const lines = prefix ? clean.map((l) => (l === "--" ? l : prefix + l)) : clean;
   return { lines };
 }
 
