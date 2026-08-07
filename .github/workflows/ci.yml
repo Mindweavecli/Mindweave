@@ -34,7 +34,29 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Test
-        run: npm test
+        shell: bash
+        # pipefail matters: without it `tee` decides the exit code and a failing
+        # suite reports success.
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+      # Full logs need admin rights on the API, so a failure was only readable by
+      # someone with repo access scrolling five thousand lines in a browser. The run
+      # summary is visible to anyone, so put the actual failures there.
+      - name: Report failures
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Failing tests"
+            echo '```'
+            grep -E "^not ok |^# (tests|pass|fail|skipped)" test-output.txt | head -80 || echo "(no test failures found: the suite may have crashed before reporting)"
+            echo '```'
+            echo "### First assertion detail"
+            echo '```'
+            grep -A 12 -m 3 "^not ok " test-output.txt | head -60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Build
         run: npm run build
 
@@ -62,6 +84,28 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Test
-        run: npm test
+        shell: bash
+        # pipefail matters: without it `tee` decides the exit code and a failing
+        # suite reports success.
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+      # Full logs need admin rights on the API, so a failure was only readable by
+      # someone with repo access scrolling five thousand lines in a browser. The run
+      # summary is visible to anyone, so put the actual failures there.
+      - name: Report failures
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Failing tests"
+            echo '```'
+            grep -E "^not ok |^# (tests|pass|fail|skipped)" test-output.txt | head -80 || echo "(no test failures found: the suite may have crashed before reporting)"
+            echo '```'
+            echo "### First assertion detail"
+            echo '```'
+            grep -A 12 -m 3 "^not ok " test-output.txt | head -60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Build
         run: npm run build
