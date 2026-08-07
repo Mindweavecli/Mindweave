@@ -228,8 +228,12 @@ test("run_command moves a slow command to the background instead of killing it",
   assert.match(res.output, /moved to the background as shell #\d+/);
   assert.equal(mgr.runningCount(), 1); // still alive
 
-  // And it finishes on its own, then notifies once.
-  await waitUntil(() => mgr.running().length === 0, 8000);
+  // And it finishes on its own, then notifies once. The wait is generous on purpose:
+  // the command sleeps 3s, but a shared CI runner also has to start a shell and a
+  // node process first, and this failed once at 8s while the identical job on a less
+  // busy runner passed. What is being tested is that it backgrounds rather than dies,
+  // not how fast a loaded machine can spawn a process.
+  await waitUntil(() => mgr.running().length === 0, 30_000);
   const drained = await mgr.drainEvents();
   assert.equal(drained.length, 1);
   mgr.dispose();

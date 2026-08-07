@@ -2,6 +2,12 @@ name: CI
 
 on:
   push:
+    # Branches only. A tag push points at a commit that has already been built, so
+    # including tags ran the whole matrix a second time on the same code. The two
+    # runs then competed for runners and one of them lost a timing-sensitive test
+    # that the other passed, which reads as a flake and is really just self-inflicted
+    # contention.
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
 
