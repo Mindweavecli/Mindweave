@@ -72,11 +72,13 @@ test("cd persists into ctx.cwd, and the session stays on ONE form of the path", 
   // `pwd -P`, which resolves symlinks, and os.tmpdir() on macOS lives under
   // /private/var. A session that recorded the logical path would compare unequal to
   // its own cwd after this command and quietly leave its own root.
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "mindweave-cross-cwd-")));
+  // NATIVE, matching canonicalRoot: Node's own realpath resolves symlinks but leaves
+  // an 8.3 short path untouched, so it cannot produce the form the session records.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "mindweave-cross-cwd-")));
   const c = ctx(process.cwd());
   await runCommand.execute({ command: SH.cd(dir) }, c);
   assert.ok(c.cwd.includes("mindweave-cross-cwd-"), `cwd should have moved into the temp dir, got ${c.cwd}`);
-  assert.equal(realpathSync(c.cwd), dir, "the recorded cwd must be the same string form the session uses");
+  assert.equal(realpathSync.native(c.cwd), dir, "the recorded cwd must be the same string form the session uses");
 });
 
 // ── interruption ──────────────────────────────────────────────────────────────
