@@ -114,6 +114,15 @@ without bloating the shared core. Only the driver you are using is ever loaded.
 
 ## Recently
 
+**v1.9.4** added an automated build and fixed the two bugs it found within hours. On
+Windows, any account name longer than eight characters has a second, shortened form,
+and Mindweave was comparing the two as though they were different directories: every
+command claimed to have changed the working directory, and paths stopped displaying
+relative to your project. Separately, with ripgrep installed, `glob` would list `.env`
+and private keys, the files every other tool declines to open, because the pattern you
+passed cancelled the exclusions that were meant to outrank it. Builds now run on
+Windows for Node 20 and 22 on every push.
+
 **v1.9.3** made search and indexing answer honestly. Results used to depend on whether
 ripgrep was installed, because only ripgrep respected `.gitignore` while both engines
 claimed to; the built-in walker now honours it as well. The code map was built from an

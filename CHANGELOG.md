@@ -8,6 +8,57 @@ features, just real use and fixing whatever that turns up.
 
 ---
 
+## v1.9.4 (2026-08-07): the first automated build, and the two bugs it found
+
+v1.9.3 shipped without an automated build. Adding one took a few hours and found two
+real defects in that time, both of which had been present for a while and neither of
+which any test on a developer machine could have caught.
+
+### One directory, two names
+
+Windows keeps an 8.3 short alias for any path component longer than eight characters,
+so `C:\Users\johnsmith\...` and `C:\Users\JOHNSM~1\...` are two names for one place.
+`run_command` decides whether a command moved the shell by comparing the working
+directory before and after as text, and the two sides came from different places: one
+from the session, the other from whatever spelling the shell printed.
+
+When they disagreed, every command reported a working-directory change it had not
+made, and the recorded directory no longer matched the project root, which is what
+makes Mindweave give up on relative paths and show you absolute ones everywhere.
+
+This affects any Windows account whose name is over eight characters, which is most
+of them. It stayed invisible because it cannot happen on a short account name, and it
+appeared within minutes of the suite running somewhere else.
+
+Paths are now resolved through the operating system rather than Node's own
+implementation of the same idea. The difference is the whole fix: Node's version
+follows symbolic links but leaves a short name exactly as it found it, so it can
+never bring the two spellings together.
+
+### Search could list the files it refuses to open
+
+With ripgrep installed, `glob` listed `.env` and private keys. Ripgrep applies its
+filename rules last-match-wins, like `.gitignore`, and the exclusions were registered
+BEFORE the caller's pattern, so a pattern as ordinary as `**/*` matched last and
+cancelled every one of them. `read_file` refuses those files and `grep` never searches
+them, so this was the one route that did not hold the line. The caller's pattern is
+now registered first and the guards after it.
+
+Two smaller disagreements between the two search engines went with it: a leading slash
+matched under ripgrep and not under the built-in walker, and multi-root results came
+back with paths that no longer pointed at a root.
+
+### Builds now run on every push
+
+Windows, on Node 20 and 22. Failures are reported as annotations, which are readable
+without special access, unlike run logs.
+
+macOS and Linux are not covered. They were tried, and the suite HANGS there rather
+than failing, which is a real defect with a real starting point rather than something
+to leave running red. Windows is the supported platform today and the README says so.
+
+---
+
 ## v1.9.3 (2026-08-07): the same answer either way, and installs that cannot hang
 
 Mostly about search and indexing telling the truth, plus the first automated test runs.

@@ -1,6 +1,6 @@
 {
   "name": "mindweave",
-  "version": "1.9.3",
+  "version": "1.9.4",
   "description": "MindWeave — a fast, model-adaptive terminal coding agent.",
   "type": "module",
   "bin": {
