@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,14 @@ import { MAX_ENTRIES, listDir } from "./listDir.js";
 import { protectedPathReason, catastrophicCommandReason } from "./guard.js";
 
 function freshCtx(): ToolContext {
-  const dir = mkdtempSync(join(tmpdir(), "mindweave-test-"));
+  // CANONICALISED, because a real session is: session.ts pins every root through
+  // canonicalRoot at creation. Without it these contexts are less faithful than the
+  // thing they stand in for, and on Windows that shows: os.tmpdir() can hand back an
+  // 8.3 short path (C:\Users\RUNNER~1\...) while a command reports the long one, so
+  // the root and the cwd stop sharing a prefix and relativize gives up and prints
+  // absolute paths. Uses the NATIVE resolver for the same reason canonicalRoot does:
+  // Node's own realpath leaves a short name exactly as it found it.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "mindweave-test-")));
   return { cwd: dir, reads: new Map(), todos: [] };
 }
 
