@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Never fetch a language server from a runner. Without this the chassis may try to
+  # install one mid-test, which turns a code failure into a network failure.
+  MINDWEAVE_NO_AUTO_INSTALL: "1"
+
+jobs:
+  # Windows only, deliberately. Mindweave targets Windows today; macOS and Linux are
+  # planned and belong to contributors. Running them here reported a hang nobody was
+  # working on, which says nothing about whether a change is good. Add those jobs back
+  # alongside the work that makes them pass.
+  windows:
+    name: Windows / Node ${{ matrix.node }}
+    runs-on: windows-latest
+    # A hung test step would otherwise hold a runner for GitHub's six hour default.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor declared in package.json engines; 22 is current LTS. Both
+        # run so a change needing a newer API fails here rather than for a user on
+        # the minimum supported version.
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # Facts about the machine, as ANNOTATIONS so they can be read without admin
+      # rights or a browser. Every wrong guess about why this build differs from a
+      # developer's machine cost a round trip; these are the things that actually
+      # differ (core count decides test concurrency, and ripgrep is the primary
+      # search engine and is NOT on this image).
+      - name: Environment facts
+        shell: bash
+        run: |
+          rg_path=$(command -v rg || echo "NOT INSTALLED")
+          echo "::notice title=Env::node=$(node -v) cores=$(node -p 'require("os").availableParallelism()') rg=${rg_path} tmp=${RUNNER_TEMP} os=${RUNNER_OS}"
+
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        shell: bash
+        # pipefail matters: without it `tee` decides the exit code and a failing
+        # suite reports success.
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+
+      # Failures as ANNOTATIONS, not only the run summary. The summary is rendered by
+      # JavaScript and full logs need admin rights on the API, so neither can be read
+      # from outside a browser. Annotations come back from the public checks API, and
+      # that difference decides whether a red build can be diagnosed at all.
+      - name: Report failures
+        if: failure()
+        shell: bash
+        run: |
+          while IFS= read -r line; do
+            echo "::error title=Test failed::${line}"
+          done < <(grep -E "^not ok " test-output.txt | head -25)
+          while IFS= read -r line; do
+            echo "::error title=Assertion::${line}"
+          done < <(grep -E "^ +(AssertionError|Error|code|expected|actual|operator):" test-output.txt | head -30)
+          counts=$(grep -E "^# (tests|pass|fail|skipped)" test-output.txt | tr '\n' ' ')
+          echo "::error title=Suite totals::${counts:-suite produced no totals, it may have crashed}"
+          {
+            echo "## Failing tests"
+            echo '```'
+            grep -E "^not ok |^# (tests|pass|fail|skipped)" test-output.txt | head -80 || echo "(none found: the suite may have crashed before reporting)"
+            echo '```'
+            echo "### First assertions"
+            echo '```'
+            grep -A 12 -m 3 "^not ok " test-output.txt | head -60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build
+        run: npm run build
