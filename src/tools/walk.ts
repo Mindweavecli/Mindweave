@@ -2,12 +2,14 @@
  * walk.ts — shared filesystem traversal for the discovery tools (glob, grep).
  *
  * Mindweave stays dependency-free, so instead of shelling out to ripgrep/fd we do a
- * plain recursive walk in Node. Two things every walk needs live here so glob
+ * plain recursive walk in Node. Three things every walk needs live here so glob
  * and grep behave consistently: a default ignore list (the noise directories no
- * search should ever descend into) and a small glob→RegExp compiler.
+ * search should ever descend into), .gitignore handling that matches what ripgrep
+ * does (see gitignore.ts for why), and a small glob→RegExp compiler.
  */
 import { promises as fs } from "node:fs";
 import { join, relative } from "node:path";
+import { isIgnored, loadIgnoreLayer, type IgnoreLayer } from "./gitignore.js";
 
 /** Directories never worth searching — version control and build output. */
 export const DEFAULT_IGNORES = new Set([
@@ -32,19 +34,42 @@ export interface Found {
   rel: string;
 }
 
+export interface WalkOptions {
+  /**
+   * Honour .gitignore files, the way ripgrep does (default true). This exists so
+   * the two search engines agree: `rg` is gitignore-aware, and before this the Node
+   * fallback was not, so the same query answered differently depending on whether
+   * `rg` happened to be installed. Pass false for a walk that must see everything
+   * regardless of ignore rules.
+   */
+  gitignore?: boolean;
+}
+
 /**
- * Recursively list files under `root`, skipping DEFAULT_IGNORES directories.
+ * Recursively list files under `root`, skipping DEFAULT_IGNORES directories and
+ * (by default) anything the project's .gitignore files exclude.
  * Stops once `limit` files are collected (returns `truncated: true` then). Paths
  * are returned in a stable sorted order so results are deterministic.
+ *
+ * SYMLINKS ARE NOT FOLLOWED, deliberately. A symlinked directory reports neither
+ * `isDirectory()` nor `isFile()`, so it used to fall through both branches and get
+ * dropped without anyone deciding that. It is now an explicit skip, for two
+ * reasons: ripgrep does not follow symlinks by default either (so the engines
+ * agree, which is the whole point of the gitignore work above), and Mindweave
+ * already has a first-class way to search code that lives elsewhere — add it as a
+ * root with `/link` or `add_directory`, which labels it and indexes it properly
+ * instead of silently splicing another tree into this one's relative paths.
  */
 export async function walkFiles(
   root: string,
   limit: number,
+  opts: WalkOptions = {},
 ): Promise<{ files: Found[]; truncated: boolean }> {
   const files: Found[] = [];
   let truncated = false;
+  const useGitignore = opts.gitignore !== false;
 
-  async function descend(dir: string): Promise<void> {
+  async function descend(dir: string, layers: IgnoreLayer[]): Promise<void> {
     if (truncated) return;
     let entries;
     try {
@@ -52,14 +77,25 @@ export async function walkFiles(
     } catch {
       return; // unreadable dir — skip it rather than fail the whole walk
     }
+
+    // A .gitignore in this directory applies to it and everything below.
+    let stack = layers;
+    if (useGitignore && entries.some((e) => e.name === ".gitignore" && !e.isDirectory())) {
+      const layer = await loadIgnoreLayer(dir);
+      if (layer) stack = [...layers, layer];
+    }
+
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (truncated) return;
       const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (DEFAULT_IGNORES.has(entry.name)) continue;
-        await descend(full);
-      } else if (entry.isFile()) {
+      const isDir = entry.isDirectory();
+      if (!isDir && !entry.isFile()) continue; // symlink / socket / device — see header
+      if (isDir && DEFAULT_IGNORES.has(entry.name)) continue;
+      if (stack.length && ignoredBy(stack, full, isDir)) continue;
+      if (isDir) {
+        await descend(full, stack);
+      } else {
         files.push({ abs: full, rel: toPosix(relative(root, full)) });
         if (files.length >= limit) {
           truncated = true;
@@ -69,8 +105,16 @@ export async function walkFiles(
     }
   }
 
-  await descend(root);
+  await descend(root, []);
   return { files, truncated };
+}
+
+/** Test an absolute path against the active .gitignore layers. */
+function ignoredBy(stack: readonly IgnoreLayer[], abs: string, isDir: boolean): boolean {
+  return isIgnored(
+    stack.map((layer) => ({ layer, rel: toPosix(relative(layer.base, abs)) })),
+    isDir,
+  );
 }
 
 /** Normalize a path to forward slashes for matching and display. */

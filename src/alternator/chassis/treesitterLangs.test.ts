@@ -1,22 +1,15 @@
 /**
- * treesitterLangs.test.ts — broad language coverage, part 1 of 3 (split so no single
- * process loads too many grammar wasms — that exhausts V8's heap; see langCases.ts).
+ * treesitterLangs.test.ts — broad language coverage, part 1 of 4 (split so no single
+ * process loads too many grammar wasms — that exhausts V8's heap; see langCases.ts,
+ * which owns the cases and the byte budget the split is balanced against).
  * Runs against the real grammars, so a query that stops compiling fails loudly.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkLang, type LangCase } from "./langCases.js";
+import { checkLang, PART1 } from "./langCases.js";
 import { treeSitterExtract } from "./treesitter.js";
 
-const CASES: LangCase[] = [
-  { file: "a.go", code: "package main\nfunc Hello() int { return doThing() }", expect: { name: "Hello", kind: "function" } },
-  { file: "a.rs", code: "struct Foo {}\nfn hello() -> i32 { do_thing() }", expect: { name: "Foo", kind: "struct" } },
-  { file: "a.java", code: "class Foo { void bar() { baz(); } }", expect: { name: "Foo", kind: "class" } },
-  { file: "a.cpp", code: "class Foo { public: void bar(); };", expect: { name: "Foo", kind: "class" } },
-  { file: "a.php", code: "<?php\nfunction hello() { return doThing(); }", expect: { name: "hello", kind: "function" } },
-];
-
-for (const c of CASES) {
+for (const c of PART1) {
   test(`${c.file}: extracts ${c.expect.kind} ${c.expect.name}`, () => checkLang(c));
 }
 

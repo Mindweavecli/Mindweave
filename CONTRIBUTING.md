@@ -97,15 +97,15 @@ in Discussions before starting so work does not collide.
   and neither has been confirmed by anyone running it on real work. This is the single
   most useful thing an outside contributor can close, and it needs a user more than it
   needs a developer.
-* **Add CI.** Tests are public and nothing runs them on a pull request. Blocked in
-  practice by the next item.
-* **Fix the test suite under parallel load.** The tree-sitter grammar tests time out when
-  the full suite runs, and the reported test count varies between runs because files get
-  starved. They pass reliably alone. Wants a concurrency limit or a per-file timeout.
-  Small, self-contained, and it unblocks CI.
+* **Reduce what the OCaml grammar costs.** Loading it can exhaust V8 when the machine is
+  already under memory pressure, which showed up for a long time as an unexplained
+  intermittent test failure. Runs now get heap headroom and the grammar-heavy files run
+  in their own sequential phase, so the suite is stable, but the cost itself is untouched
+  and the containment is the kind that quietly stops working.
 * **Cover the ripgrep search path.** `rg` is the primary engine when installed, and the
   development machine does not have it, so only the pure-Node fallback is exercised
-  behaviourally. Both engines must agree, including about what they refuse to search.
+  behaviourally. Both engines must agree, including about what they refuse to search and
+  about which `.gitignore` rules they honour.
 * **Reduce exploration round trips.** The agent tends to look things up one at a time
   rather than requesting everything it needs at once, and each round is a full model call.
   Repeated reads are now caught and refused, so a round costs less, but the shape is

@@ -253,6 +253,15 @@ export function isSupported(absPath: string): boolean {
   return extname(absPath).toLowerCase() in LANGS;
 }
 
+/** The directory holding the grammar wasm files. Exported so the language tests can
+ *  weigh a grammar without duplicating how it is located. */
+export const GRAMMAR_DIR = WASM_DIR;
+
+/** The grammar wasm filename a path would load, or null if unsupported. */
+export function grammarFileFor(absPath: string): string | null {
+  return LANGS[extname(absPath).toLowerCase()]?.grammar ?? null;
+}
+
 /** The JS/TS family — these also carry DOM references to markup names. */
 const JS_TS_EXTS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"]);
 

@@ -2,14 +2,18 @@
  * index.ts — the Chassis: build the code graph from a project and answer queries.
  *
  * This is what the tools and engine talk to (the `Chassis` interface in types.ts).
- * v1 sources the graph from the tree-sitter tier (universal, `name-level`); the
- * LSP tier later merges in `resolved` facts over the top. Building is plain,
+ * The graph is sourced from the tree-sitter tier ONLY (universal, `name-level`).
+ * The LSP tier is consulted per query and takes precedence when it answers; its
+ * results are never written back into the graph, so anything reading the graph
+ * directly — `relevant`, `outline`, `directorySummary` — is on the tree-sitter
+ * tier regardless of whether a language server is running. Building is plain,
  * deterministic work — the `alternator` lane runs it in the background, so it
  * costs no tokens.
  */
 import { promises as fs } from "node:fs";
 import { dirname, extname, resolve as resolvePath } from "node:path";
 import { walkFiles } from "../../tools/walk.js";
+import { excludedFromSearch } from "../../tools/guard.js";
 import { loadCache, saveCache, type ChassisSnapshot, type FileStamp } from "./cache.js";
 import { CodeGraph } from "./graph.js";
 import { LspManager } from "./lsp.js";
@@ -118,7 +122,14 @@ export class CodeChassis implements Chassis {
    * file to the LSP so a warm (cache-restored) start can still answer `resolved`.
    */
   async refresh(): Promise<void> {
-    const { files } = await walkFiles(this.root, MAX_FILES);
+    const walked = await walkFiles(this.root, MAX_FILES);
+    // The code graph is a search surface like any other: `definition`,
+    // `references`, `relevant` and outline's folder rollup all read out of it. So
+    // it must honour the same exclusion grep/glob/read_file do, or indexing becomes
+    // the quiet way to surface a secret or another agent's data that every direct
+    // route refuses. Filtered at the SOURCE rather than at each query, so a new
+    // reader of the graph cannot forget it.
+    const files = walked.files.filter((f) => !excludedFromSearch(f.abs));
     const seen = new Set<FileId>();
     for (const f of files) {
       // Note every file with a known language server — LSP precision can cover
@@ -223,12 +234,14 @@ export class CodeChassis implements Chassis {
     if (this.lsp) {
       const hits = await this.lsp.symbols(name);
       if (hits.length) {
-        const h = hits[0];
-        const locs = await this.lsp.references(h.file, h.line, h.character);
-        if (locs.length) {
-          const refs: Ref[] = locs.map((l) => ({ file: asFileId(l.file), line: l.line, confidence: "resolved" }));
-          return { refs, confidence: "resolved" };
-        }
+        const lsp = this.lsp;
+        const refs = await collectLspReferences(hits, (f, l, c) => lsp.references(f, l, c));
+        // A language server that located the symbol and reports no callers has
+        // ANSWERED — the symbol is unused. Falling through to the graph here would
+        // replace that correct answer with name-level string matches, which is how
+        // an unused symbol acquires imaginary callers. Only an LSP that could not
+        // find the symbol at all falls back.
+        return { refs, confidence: "resolved" };
       }
     }
     return this.graph.references(name);
@@ -369,6 +382,37 @@ export class CodeChassis implements Chassis {
 function parentDir(file: FileId): FileId | null {
   const at = file.lastIndexOf("/");
   return at > 0 ? (file.slice(0, at) as FileId) : null;
+}
+
+/**
+ * Every caller of every definition of a name, from a language server.
+ *
+ * Asks about ALL the definitions the server found, not just the first. A name
+ * defined in several places (two classes with a `render`, a helper duplicated per
+ * module) has several distinct sets of callers, and answering for an arbitrary one
+ * while still claiming `resolved` is worse than the name-level answer it replaces:
+ * it is both narrower AND more confident, and `resolved` is what suppresses the
+ * "verify with grep" caveat. Deduped by file:line, since two definitions can share
+ * a call site (an overload, a re-export).
+ *
+ * Pure apart from the injected lookup, so the fan-out is testable without a live
+ * language server.
+ */
+export async function collectLspReferences(
+  hits: readonly { file: string; line: number; character: number }[],
+  lookup: (file: string, line: number, character: number) => Promise<readonly { file: string; line: number }[]>,
+): Promise<Ref[]> {
+  const refs: Ref[] = [];
+  const seen = new Set<string>();
+  for (const h of hits) {
+    for (const l of await lookup(h.file, h.line, h.character)) {
+      const key = `${l.file}:${l.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      refs.push({ file: asFileId(l.file), line: l.line, confidence: "resolved" });
+    }
+  }
+  return refs;
 }
 
 const IMPORT_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py"];

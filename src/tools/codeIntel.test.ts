@@ -225,3 +225,61 @@ test("read_symbol satisfies the read-before-edit gate, as it now claims", async 
 test("read_symbol's stated line cap is the real one", () => {
   assert.match(readSymbolTool.description, /after 400 lines/i);
 });
+
+test("a truncated directory outline SAYS it is a sample, in the reply itself", async () => {
+  // The description warns a cap exists, but a model reading one reply cannot tell
+  // whether THIS answer hit it. Silent truncation looks like completeness.
+  const dir = mkdtempSync(join(tmpdir(), "mindweave-cap-"));
+  await fs.mkdir(join(dir, "src"), { recursive: true });
+  for (let i = 0; i < 45; i++) {
+    await fs.writeFile(join(dir, "src", `f${i}.ts`), `export function fn${i}() { return ${i}; }\n`);
+  }
+  const chassis = new CodeChassis(dir, { lsp: false });
+  await chassis.build();
+  const ctx: ToolContext = { cwd: dir, reads: new Map(), chassis, todos: [] };
+
+  const r = await outlineTool.execute({ path: "src" }, ctx);
+  assert.match(r.output, /outlined 40 of 45 files/, "must state what it left out");
+  assert.match(r.output, /sample/i);
+});
+
+test("an un-truncated outline does NOT claim to be a sample", async () => {
+  const ctx = await projectCtx();
+  const r = await outlineTool.execute({ path: "src" }, ctx);
+  assert.doesNotMatch(r.output, /is a sample/i);
+});
+
+test("outline applies the same search exclusions as grep and glob", async () => {
+  // outline reads file CONTENTS to build its answer, so it was the discovery tool
+  // that most needed the exclusion and the one not applying it.
+  const dir = mkdtempSync(join(tmpdir(), "mindweave-excl-"));
+  await fs.writeFile(join(dir, "app.ts"), "export function keep() { return 1; }\n");
+  await fs.mkdir(join(dir, ".claude"), { recursive: true });
+  await fs.writeFile(join(dir, ".claude", "agent.ts"), "export function secretAgentThing() {}\n");
+  const chassis = new CodeChassis(dir, { lsp: false });
+  await chassis.build();
+  const ctx: ToolContext = { cwd: dir, reads: new Map(), chassis, todos: [] };
+
+  const r = await outlineTool.execute({ path: "." }, ctx);
+  assert.match(r.output, /keep/);
+  assert.doesNotMatch(r.output, /secretAgentThing/, "excluded path was outlined");
+});
+
+test("the code GRAPH never indexes excluded paths, so no query can surface them", async () => {
+  // Indexing is the source. If an excluded file reaches the graph, then definition,
+  // references, relevant and outline's rollup can all surface it, each of which
+  // would otherwise be refused by read_file/grep/glob.
+  const dir = mkdtempSync(join(tmpdir(), "mindweave-graph-excl-"));
+  await fs.writeFile(join(dir, "app.ts"), "export function keep() { return 1; }\n");
+  await fs.mkdir(join(dir, ".claude"), { recursive: true });
+  await fs.writeFile(join(dir, ".claude", "agent.ts"), "export function hiddenAgentFn() {}\n");
+  const chassis = new CodeChassis(dir, { lsp: false });
+  await chassis.build();
+
+  assert.equal((await chassis.definition("keep")).symbols.length, 1);
+  assert.equal(
+    (await chassis.definition("hiddenAgentFn")).symbols.length,
+    0,
+    "another agent's file reached the code graph",
+  );
+});

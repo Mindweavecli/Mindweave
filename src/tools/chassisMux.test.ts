@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { allChassis, chassisForPath, mergedDefinition, mergedRelevant } from "./chassisMux.js";
+import { allChassis, chassisForPath, mergedDefinition, mergedReferences, mergedRelevant } from "./chassisMux.js";
 import { asFileId, makeSymbolId, type Chassis, type RankedSymbol, type SymbolNode } from "../alternator/chassis/types.js";
 import { CodeGraph } from "../alternator/chassis/graph.js";
 import type { ToolContext } from "./types.js";
@@ -65,6 +65,47 @@ test("mergedDefinition unions hits from both roots", async () => {
   const b = fakeChassis({ foo: [sym(join(ROOT_B, "y.ts"), "foo", 9)] }, []);
   const { symbols } = await mergedDefinition(ctxTwo(a, b), "foo");
   assert.equal(symbols.length, 2);
+});
+
+test("a merged list is only 'resolved' when EVERY root resolved it", async () => {
+  // One root has a language server, the other is on the tree-sitter tier. The
+  // merged list is one list to the reader, so it must not be marked resolved:
+  // that is what suppresses the "verify with grep" caveat the name-level half needs.
+  const resolvedRoot = fakeChassis({}, []);
+  resolvedRoot.definition = async (name) => ({
+    symbols: [sym(join(ROOT_A, "x.ts"), name, 1)],
+    confidence: "resolved",
+  });
+  const nameLevelRoot = fakeChassis({ foo: [sym(join(ROOT_B, "y.ts"), "foo", 9)] }, []);
+
+  const mixed = await mergedDefinition(ctxTwo(resolvedRoot, nameLevelRoot), "foo");
+  assert.equal(mixed.symbols.length, 2);
+  assert.equal(mixed.confidence, "name-level");
+
+  // Both resolved is still resolved — the rule must not just always downgrade.
+  const otherResolved = fakeChassis({}, []);
+  otherResolved.definition = async (name) => ({
+    symbols: [sym(join(ROOT_B, "y.ts"), name, 9)],
+    confidence: "resolved",
+  });
+  const both = await mergedDefinition(ctxTwo(resolvedRoot, otherResolved), "foo");
+  assert.equal(both.confidence, "resolved");
+});
+
+test("mergedReferences carries the same weakest-wins rule", async () => {
+  const resolvedRoot = fakeChassis({}, []);
+  resolvedRoot.references = async () => ({
+    refs: [{ file: asFileId(join(ROOT_A, "x.ts")), line: 3, confidence: "resolved" as const }],
+    confidence: "resolved",
+  });
+  const nameLevelRoot = fakeChassis({}, []);
+  nameLevelRoot.references = async () => ({
+    refs: [{ file: asFileId(join(ROOT_B, "y.ts")), line: 4, confidence: "name-level" as const }],
+    confidence: "name-level",
+  });
+  const { refs, confidence } = await mergedReferences(ctxTwo(resolvedRoot, nameLevelRoot), "foo");
+  assert.equal(refs.length, 2);
+  assert.equal(confidence, "name-level");
 });
 
 test("mergedRelevant merges by score and caps to the limit (no graphs)", async () => {

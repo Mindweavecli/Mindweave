@@ -31,9 +31,18 @@ export function chassisForPath(ctx: ToolContext, abs: string): Chassis | undefin
   return ctx.chassis;
 }
 
-/** Best confidence across answers — `resolved` wins if any source resolved it. */
-function bestConfidence(values: Confidence[]): Confidence {
-  return values.some((c) => c === "resolved") ? "resolved" : "name-level";
+/**
+ * Confidence for a MERGED list, which is the confidence of its weakest part.
+ *
+ * The merged list is one list to the reader, and the caveat printed from this value
+ * governs all of it. So a root running a language server must not vouch for a root
+ * that is on the tree-sitter tier: taking the best there marks name-level entries
+ * `resolved` purely by association, and `resolved` is exactly what suppresses the
+ * "verify with grep" note those entries need. Each `Ref` still carries its own
+ * per-entry confidence for anyone who wants the finer answer.
+ */
+function mergedConfidence(values: Confidence[]): Confidence {
+  return values.every((c) => c === "resolved") && values.length > 0 ? "resolved" : "name-level";
 }
 
 /** Where a symbol is defined, merged across every root. */
@@ -50,7 +59,7 @@ export async function mergedDefinition(
     symbols.push(...r.symbols);
     if (r.symbols.length) confidences.push(r.confidence);
   }
-  return { symbols, confidence: bestConfidence(confidences) };
+  return { symbols, confidence: mergedConfidence(confidences) };
 }
 
 /** Who references a symbol, merged across every root. */
@@ -67,7 +76,7 @@ export async function mergedReferences(
     refs.push(...r.refs);
     if (r.refs.length) confidences.push(r.confidence);
   }
-  return { refs, confidence: bestConfidence(confidences) };
+  return { refs, confidence: mergedConfidence(confidences) };
 }
 
 /** The span(s) of a named symbol's definition, across every root. A `path` is only

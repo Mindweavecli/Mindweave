@@ -13,7 +13,7 @@ process.env.HOME = FAKE_HOME;
 
 import { CodeGraph, nestOutline } from "./graph.js";
 import { rankSymbols } from "./rank.js";
-import { CodeChassis } from "./index.js";
+import { CodeChassis, collectLspReferences } from "./index.js";
 import { asFileId, makeSymbolId, type FileId, type SymbolNode } from "./types.js";
 
 function def(graph: CodeGraph, file: FileId, name: string, line = 1): void {
@@ -241,4 +241,31 @@ test("refresh re-indexes changed files and drops deleted ones", async () => {
   await fs.rm(join(dir, "src/b.ts"));
   await ch.refresh();
   assert.equal((await ch.definition("two")).symbols.length, 0, "deleted file's symbols removed");
+});
+
+test("LSP references cover every definition of the name, not just the first", async () => {
+  // Two classes both define `render`; each has its own caller. Asking only the
+  // first definition returns half the answer while still claiming `resolved`.
+  const hits = [
+    { file: "/p/panel.ts", line: 10, character: 2 },
+    { file: "/p/chart.ts", line: 20, character: 2 },
+  ];
+  const byDef: Record<string, { file: string; line: number }[]> = {
+    "/p/panel.ts": [{ file: "/p/usesPanel.ts", line: 5 }],
+    "/p/chart.ts": [{ file: "/p/usesChart.ts", line: 7 }],
+  };
+  const refs = await collectLspReferences(hits, async (f) => byDef[f] ?? []);
+  const files = refs.map((r) => String(r.file)).sort();
+  assert.deepEqual(files, ["/p/usesChart.ts", "/p/usesPanel.ts"]);
+  assert.ok(refs.every((r) => r.confidence === "resolved"));
+});
+
+test("a call site shared by two definitions is reported once", async () => {
+  const hits = [
+    { file: "/p/a.ts", line: 1, character: 0 },
+    { file: "/p/b.ts", line: 1, character: 0 },
+  ];
+  // An overload pair: both definitions resolve to the same call site.
+  const refs = await collectLspReferences(hits, async () => [{ file: "/p/caller.ts", line: 9 }]);
+  assert.equal(refs.length, 1);
 });

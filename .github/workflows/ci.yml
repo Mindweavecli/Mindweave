@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Never fetch a language server from a CI runner. Without this the chassis may
+  # try to install one mid-test, which turns a code failure into a network failure.
+  MINDWEAVE_NO_AUTO_INSTALL: "1"
+
+jobs:
+  # The gate. Windows is the platform Mindweave is currently developed and verified
+  # on, so this is the job that is allowed to block a merge.
+  windows:
+    name: Windows / Node ${{ matrix.node }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor declared in package.json engines; 22 is current LTS. Both
+        # run so a change that needs a newer API fails here rather than for a user
+        # on the minimum supported version.
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  # Informational, NOT a gate. macOS and Linux have never been verified by a run,
+  # only reasoned about, and they belong to contributors rather than to the core.
+  # Reporting them without blocking turns "unverified" into real data: the results
+  # are visible on every push, and a contributor fixing a platform can see progress
+  # without a red X gating everyone else's merges in the meantime. Promote a
+  # platform into the gating job above once it is genuinely green.
+  other-platforms:
+    name: ${{ matrix.os }} (informational)
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build

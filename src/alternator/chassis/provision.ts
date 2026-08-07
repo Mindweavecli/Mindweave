@@ -16,7 +16,7 @@
  * MINDWEAVE_NO_AUTO_INSTALL. In-flight installs are deduped so a language is fetched
  * once per session.
  */
-import { spawn } from "node:child_process";
+import { killTree, spawnManaged } from "../../tools/killTree.js";
 import { existsSync, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -110,6 +110,49 @@ async function doInstall(key: string, spec: InstallSpec, log?: (m: string) => vo
   return resolved;
 }
 
+/**
+ * Ceilings for provisioning. Every wait here is on something external — a registry,
+ * a release download, an extract — and provisioning is BEST EFFORT: failing just
+ * leaves that language on the tree-sitter tier, which is a working state.
+ *
+ * Before these existed, none of the three waits below was bounded: the spawns had
+ * no timeout and were never killed, and `fetch` had no signal. A stalled install
+ * therefore hung forever AND left its process tree behind, and because installs are
+ * deduped through `inflight`, the never-resolving promise was handed to every later
+ * caller for the rest of the session. That is the shape of "fresh project dirs,
+ * processes piling up, runs hanging past ten minutes": a fresh dir is exactly when
+ * provisioning runs, and a warm one skips it entirely.
+ */
+const NPM_INSTALL_TIMEOUT_MS = 180_000; // a real install of a language server
+const DOWNLOAD_TIMEOUT_MS = 120_000; // release asset, tens of MB
+const EXTRACT_TIMEOUT_MS = 60_000;
+
+/**
+ * Run a child to completion, but never wait forever: on timeout the whole process
+ * tree is killed and the step reports failure. Tree-killing matters because the
+ * things spawned here (npm, tar) start children of their own, and killing only the
+ * shell leaves those holding on.
+ */
+export function runBounded(command: string, args: readonly string[], options: Parameters<typeof spawnManaged>[2], timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const child = spawnManaged(command, args, options);
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const timer = setTimeout(() => {
+      killTree(child.pid);
+      finish(false);
+    }, timeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+    child.on("error", () => finish(false));
+    child.on("close", (code) => finish(code === 0));
+  });
+}
+
 // ── npm source ──────────────────────────────────────────────────────────────
 async function installNpm(key: string, spec: NpmInstall): Promise<boolean> {
   const dir = installDir(key);
@@ -122,11 +165,7 @@ async function installNpm(key: string, spec: NpmInstall): Promise<boolean> {
   // Pass the whole command as one string for the shell (npm is a .cmd shim on
   // Windows). Args are from the curated registry, not user input.
   const cmd = `npm install ${spec.package}@${spec.version} --no-save --no-audit --no-fund --loglevel=error`;
-  return new Promise<boolean>((resolve) => {
-    const child = spawn(cmd, { cwd: dir, shell: true, windowsHide: true, stdio: "ignore" });
-    child.on("error", () => resolve(false));
-    child.on("close", (code) => resolve(code === 0));
-  });
+  return runBounded(cmd, [], { cwd: dir, shell: true, stdio: "ignore" }, NPM_INSTALL_TIMEOUT_MS);
 }
 
 // ── github source ────────────────────────────────────────────────────────────
@@ -171,8 +210,10 @@ async function installGithub(key: string, spec: GithubInstall): Promise<boolean>
 
 /** Download `url` to `dest` (follows GitHub's redirect to the CDN). */
 async function download(url: string, dest: string): Promise<boolean> {
+  // AbortSignal.timeout covers the whole exchange, body included — a stalled
+  // download mid-body is the realistic failure, not a stalled connect.
   try {
-    const res = await fetch(url, { redirect: "follow" });
+    const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
     if (!res.ok) return false;
     await fs.writeFile(dest, Buffer.from(await res.arrayBuffer()));
     return true;
@@ -184,9 +225,5 @@ async function download(url: string, dest: string): Promise<boolean> {
 /** Extract a tarball with the system `tar` (handles .tar.gz / .tar.xz on every
  *  platform; Windows 10+ ships bsdtar). */
 function runTar(archive: string, dir: string): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const child = spawn("tar", ["-xf", archive, "-C", dir], { windowsHide: true, stdio: "ignore" });
-    child.on("error", () => resolve(false));
-    child.on("close", (code) => resolve(code === 0));
-  });
+  return runBounded("tar", ["-xf", archive, "-C", dir], { stdio: "ignore" }, EXTRACT_TIMEOUT_MS);
 }

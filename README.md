@@ -111,6 +111,16 @@ without bloating the shared core. Only the driver you are using is ever loaded.
 
 ## Recently
 
+**v1.9.3** made search and indexing answer honestly. Results used to depend on whether
+ripgrep was installed, because only ripgrep respected `.gitignore` while both engines
+claimed to; the built-in walker now honours it as well. The code map was built from an
+unfiltered walk, so lookups could surface symbols from files that `read_file` and `grep`
+refuse to open, and that exclusion now applies when indexing. Language server installs
+could hang forever and leave processes running behind them, which is what made fresh
+projects stall for minutes at a time; every step now has a deadline. There is also CI at
+last, and the crash that used to block it turned out to be an out-of-memory fault rather
+than a scheduling problem.
+
 **v1.9.2** cut how much the agent says and how often it re-reads. It was writing a
 paragraph before every tool call, so a turn with twenty lookups printed twenty
 paragraphs of the same plan restated; it now writes one line per turn, and replies match
@@ -148,16 +158,15 @@ Written down rather than quietly carried. Several are good places to start if yo
 contribute, and each links to what it would actually take.
 
 **macOS and Linux are unverified.** Development happens on Windows. Both are believed to
-work and neither has been confirmed by anyone running it in anger. This is the single
-most useful thing an outside contributor can close.
+work and neither has been confirmed by anyone running it in anger. CI now runs the suite
+on both and reports the result without blocking, so there is finally a signal to work
+from, but a green run is not the same as somebody using it. This is still the single most
+useful thing an outside contributor can close.
 
-**There is no CI.** Tests are public and nothing runs them on a pull request. A fresh
-clone has no automated signal.
-
-**The test suite is unstable under parallel load.** The tree-sitter grammar tests time out
-when the full suite runs, and the reported test count varies between runs because files
-get starved. Passes reliably when run alone. Wants either a concurrency limit or a longer
-timeout for that file, and it blocks the CI item above.
+**The out-of-memory crash is contained, not cured.** Loading the OCaml grammar can
+exhaust V8 when the machine is already under memory pressure. Test runs are given heap
+headroom and the grammar-heavy files run in their own sequential phase, which holds, but
+the underlying cost of that grammar is unchanged.
 
 **The agent explores in more round trips than it needs.** It tends to look things up one
 at a time rather than asking for everything it needs at once, and each round is a full

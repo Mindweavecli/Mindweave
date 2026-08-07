@@ -8,6 +8,78 @@ features, just real use and fixing whatever that turns up.
 
 ---
 
+## v1.9.3 (2026-08-07): the same answer either way, and installs that cannot hang
+
+Mostly about search and indexing telling the truth, plus the first automated test runs.
+
+### Search gave different answers depending on your machine
+
+Mindweave searches with ripgrep when it is installed and with a built-in walker when it
+is not. Only ripgrep respected `.gitignore`, while both tools described that behaviour as
+though it always applied. The same query on the same project therefore returned different
+results on two machines, and nothing in the reply said which engine had answered.
+
+The built-in walker now honours `.gitignore` too: nested ignore files, negated rules,
+directory-only rules, and last-match-wins precedence. An unsupported rule is treated as
+matching nothing, so the walker errs toward showing a file rather than hiding one, since
+a wrongly hidden file looks exactly like a file that does not exist.
+
+Symlinked directories are now skipped deliberately rather than by accident. They used to
+fall through an `isDirectory`/`isFile` check and vanish with no decision behind it.
+Ripgrep does not follow them either, and code that lives elsewhere is better added as a
+workspace root with `/link`, which labels and indexes it properly.
+
+### The code map indexed files every other tool refuses to open
+
+`definition`, `references`, `relevant` and the folder rollup all read out of the code
+map, and the code map was built from an unfiltered walk. So symbols from `.env`-adjacent
+files and from other coding agents' directories could be surfaced by a lookup, even
+though `read_file`, `grep` and `glob` all decline those paths directly. The exclusion is
+now applied when indexing, at the source, rather than at each query.
+
+### Answers that claimed more certainty than they had
+
+* `references` asked the language server about only the first definition of a name, then
+  reported the result as compiler-resolved. A name defined in three places returned one
+  set of callers with full confidence. It now covers every definition and removes
+  duplicate call sites.
+* A symbol the language server confirms has no callers is now reported as unused. It
+  previously fell back to matching the name as text, which invented callers for it.
+* In a multi-root workspace, a merged list is only labelled resolved when every root
+  resolved it. One root running a language server no longer vouches for a root that is
+  not, which had been suppressing the "verify this" note on the half that needed it.
+* `outline` on a large directory now says how many files it actually covered. It stops
+  after 40, and a partial survey that does not say so reads as the shape of the whole
+  folder.
+
+### Sessions that hung, and processes that piled up
+
+Installing a language server ran `npm install` with no timeout and never killed it, and
+downloads had no deadline. A stalled install waited forever, left its process tree
+running, and because installs are shared, handed that same never-finishing wait to
+everything that asked afterwards. This is why fresh project directories could hang for
+ten minutes or more while background processes accumulated: a fresh directory is exactly
+when a server gets installed, and a warm one skips the step.
+
+Every step now has a deadline and kills its whole process tree when it expires. A failed
+install is a normal outcome that leaves the language on the tree-sitter tier, which
+works.
+
+### Tests now run automatically
+
+There is a CI workflow. Windows is the gate, on Node 20 and 22. macOS and Linux run on
+every push and report without blocking, which turns "unverified" into something you can
+actually look at.
+
+The suite's intermittent crash under load was diagnosed rather than worked around: it is
+`Fatal process out of memory: Zone`, caused by the size of the OCaml grammar rather than
+by test scheduling. It survived forcing single-file concurrency, and it followed the
+OCaml cases when they were moved between files. Test runs now have heap headroom, and
+the grammar-heavy files run in their own sequential phase. The language cases were also
+rebalanced by grammar size, with a guard test that fails if that balance drifts.
+
+---
+
 ## v1.9.2 (2026-08-07): what it says, and what it reads twice
 
 Two problems, both found by running the agent on a real project rather than by reading

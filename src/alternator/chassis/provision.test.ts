@@ -15,7 +15,7 @@ const FAKE_HOME = mkdtempSync(join(tmpdir(), "mindweave-prov-home-"));
 process.env.USERPROFILE = FAKE_HOME;
 process.env.HOME = FAKE_HOME;
 
-const { resolveInstalled, ensureInstalled, autoInstallEnabled, platformKey } = await import("./provision.js");
+const { resolveInstalled, ensureInstalled, autoInstallEnabled, platformKey, runBounded } = await import("./provision.js");
 
 const NPM_SPEC = { source: "npm" as const, package: "bash-language-server", version: "5.4.3", binName: "bash-language-server" };
 
@@ -80,3 +80,59 @@ test(
     assert.ok(existsSync(cmd!), "the binary should exist on disk");
   },
 );
+
+test("a hanging install is bounded, killed, and reported as failure", async () => {
+  // The hang shape this guards: provisioning spawned npm/tar with no timeout and
+  // never killed them, so a stalled install waited forever AND left its process
+  // tree running. Because installs are deduped, that one promise then poisoned
+  // every later caller for the session.
+  const node = process.execPath;
+  const started = Date.now();
+  // A child that deliberately never exits, held open by a long timer.
+  const ok = await runBounded(node, ["-e", "setTimeout(() => {}, 600000)"], { stdio: "ignore" }, 700);
+  const elapsed = Date.now() - started;
+
+  assert.equal(ok, false, "a timed-out install must report failure, not success");
+  assert.ok(elapsed < 10_000, `should give up promptly, took ${elapsed}ms`);
+});
+
+test("a fast command still succeeds through the bounded runner", async () => {
+  // Guards against the timeout being so eager that normal installs fail.
+  const ok = await runBounded(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" }, 30_000);
+  assert.equal(ok, true);
+});
+
+test("a command that exits non-zero is a failure, not a hang", async () => {
+  const ok = await runBounded(process.execPath, ["-e", "process.exit(3)"], { stdio: "ignore" }, 30_000);
+  assert.equal(ok, false);
+});
+
+test("the timed-out child is actually killed, not just abandoned", async () => {
+  // Bounding the WAIT without killing the process is the half-fix: the call returns
+  // but the process tree keeps running, which is the "processes piling up" half of
+  // the symptom. Proven by behaviour: the child keeps appending to a file, so if it
+  // survived the timeout the file keeps growing afterwards.
+  const { writeFileSync, readFileSync } = await import("node:fs");
+  const marker = join(mkdtempSync(join(tmpdir(), "mindweave-kill-")), "beat.txt");
+  writeFileSync(marker, "");
+  // Beat once at startup, THEN on an interval: under parallel suite load a Node
+  // process can take a second or more just to boot, and a child that is killed
+  // before its first interval tick leaves an empty marker that proves nothing.
+  const script =
+    `const fs=require('fs');const f=${JSON.stringify(marker)};` +
+    `fs.appendFileSync(f,'x');setInterval(()=>fs.appendFileSync(f,'x'),50);`;
+
+  // Generous bound for the same reason — this test is about the kill, not the
+  // precision of the timeout, which the two tests above already pin.
+  await runBounded(process.execPath, ["-e", script], { stdio: "ignore" }, 5_000);
+  assert.ok(readFileSync(marker, "utf8").length > 0, "child never ran, so this proves nothing");
+
+  // killTree is asynchronous (it spawns taskkill / escalates signals), so the child
+  // may write a few more beats after runBounded resolves. Settle first, THEN measure
+  // twice: a dead child leaves the two measurements equal.
+  await new Promise((r) => setTimeout(r, 1000));
+  const settled = readFileSync(marker, "utf8").length;
+  await new Promise((r) => setTimeout(r, 1000)); // room for ~20 more beats
+  const later = readFileSync(marker, "utf8").length;
+  assert.equal(later, settled, "child survived the timeout and kept running");
+});

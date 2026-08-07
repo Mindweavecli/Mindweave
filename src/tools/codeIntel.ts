@@ -13,6 +13,7 @@ import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { relativize, resolvePath } from "./paths.js";
 import { allChassis, chassisForPath, mergedDefinition, mergedReferences, mergedRelevant } from "./chassisMux.js";
 import { walkFiles } from "./walk.js";
+import { excludedFromSearch } from "./guard.js";
 import { isSupported } from "../alternator/chassis/treesitter.js";
 import { isMarkupSupported } from "../alternator/chassis/markup.js";
 import type { Confidence, DirectorySummary, OutlineEntry } from "../alternator/chassis/types.js";
@@ -70,6 +71,7 @@ export const outlineTool: Tool = {
 
     const groups: { file: string; entries: readonly OutlineEntry[] }[] = [];
     let rollup = "";
+    let dirTruncated: { shown: number; total: number } | null = null;
     if (stat.isFile()) {
       const entries = await (chassisForPath(ctx, abs)?.outline(abs) ?? Promise.resolve([]));
       groups.push({ file: abs, entries });
@@ -78,7 +80,21 @@ export const outlineTool: Tool = {
       const summary = await chassisForPath(ctx, abs)?.directorySummary(abs);
       if (summary) rollup = renderDirSummary(ctx, summary);
       const { files } = await walkFiles(abs, 5000);
-      const supported = files.filter((f) => isSupported(f.abs) || isMarkupSupported(f.abs)).slice(0, DIR_FILE_CAP);
+      // `excludedFromSearch` is what keeps secrets and other agents' data out of
+      // grep and glob. outline walked the same tree without it, so the one
+      // discovery tool that reads file CONTENTS to build its output was the one not
+      // applying the exclusion. Same list, same walk, same rule.
+      const eligible = files.filter(
+        (f) => !excludedFromSearch(f.abs) && (isSupported(f.abs) || isMarkupSupported(f.abs)),
+      );
+      const supported = eligible.slice(0, DIR_FILE_CAP);
+      // Say so when the cap bites. The description warns that a cap exists, but a
+      // model reading one particular reply cannot tell whether THIS answer hit it,
+      // and truncation that looks like completeness is how a partial survey gets
+      // treated as the shape of the whole folder.
+      if (eligible.length > supported.length) {
+        dirTruncated = { shown: supported.length, total: eligible.length };
+      }
       for (const f of supported) {
         const entries = (await chassisForPath(ctx, f.abs)?.outline(f.abs)) ?? [];
         if (entries.length) groups.push({ file: f.abs, entries });
@@ -91,10 +107,17 @@ export const outlineTool: Tool = {
         return `${header}\n${renderOutlineEntries(g.entries).join("\n")}`;
       })
       .join("\n\n");
+    const truncNote = dirTruncated
+      ? `\n\n(outlined ${dirTruncated.shown} of ${dirTruncated.total} files — this is a ` +
+        `sample, not the whole folder; narrow to a subfolder to see the rest)`
+      : "";
     const body = [rollup, outlineBody].filter(Boolean).join("\n\n");
 
     if (!body) return { output: `No symbols found in ${rawPath}.${indexingNote(ctx)}`, summary: `outline ${rawPath} (empty)` };
-    return { output: body + indexingNote(ctx), summary: `outline ${rawPath} (${groups.length} file${groups.length === 1 ? "" : "s"})` };
+    return {
+      output: body + truncNote + indexingNote(ctx),
+      summary: `outline ${rawPath} (${groups.length} file${groups.length === 1 ? "" : "s"})`,
+    };
   },
 };
 
