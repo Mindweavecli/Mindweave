@@ -51,10 +51,19 @@ jobs:
         if: failure()
         shell: bash
         run: |
+          # As ANNOTATIONS, not just the run summary. The summary is rendered by
+          # JavaScript and full logs need admin rights, so neither can be read from
+          # outside a browser; annotations come back from the public checks API. That
+          # difference is what decides whether a red build can be diagnosed at all.
+          while IFS= read -r line; do
+            echo "::error title=Test failed::${line}"
+          done < <(grep -E "^not ok " test-output.txt | head -25)
+          counts=$(grep -E "^# (tests|pass|fail|skipped)" test-output.txt | tr '\n' ' ')
+          echo "::error title=Suite totals::${counts:-suite produced no totals, it may have crashed}"
           {
             echo "## Failing tests"
             echo '```'
-            grep -E "^not ok |^# (tests|pass|fail|skipped)" test-output.txt | head -80 || echo "(no test failures found: the suite may have crashed before reporting)"
+            grep -E "^not ok |^# (tests|pass|fail|skipped)" test-output.txt | head -80 || echo "(none found: the suite may have crashed before reporting)"
             echo '```'
             echo "### First assertion detail"
             echo '```'
