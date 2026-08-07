@@ -67,9 +67,14 @@ works.
 
 ### Tests now run automatically
 
-There is a CI workflow. Windows is the gate, on Node 20 and 22. macOS and Linux run on
-every push and report without blocking, which turns "unverified" into something you can
-actually look at.
+There is a CI workflow, running on Windows on Node 20 and 22.
+
+macOS and Linux were tried and then removed again. The suite does not fail there, it
+HANGS: the test step ran past fifteen minutes with no end while the same suite finished
+on Windows in three. That points at process handling which has only ever been exercised
+on one platform. Reporting a hang nobody is working on says nothing about whether a
+change is good, so those jobs come back with the work that makes them pass. Windows is
+the supported platform today, and the README says so plainly.
 
 The suite's intermittent crash under load was diagnosed rather than worked around: it is
 `Fatal process out of memory: Zone`, caused by the size of the OCaml grammar rather than

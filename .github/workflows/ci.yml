@@ -12,11 +12,15 @@ env:
   MINDWEAVE_NO_AUTO_INSTALL: "1"
 
 jobs:
-  # The gate. Windows is the platform Mindweave is currently developed and verified
-  # on, so this is the job that is allowed to block a merge.
+  # Windows only, deliberately. Mindweave targets Windows today; macOS and Linux are
+  # planned and belong to contributors, so running them here would report failures
+  # nobody is currently working on and would say nothing about whether a change is
+  # good. Add those jobs back alongside the work that makes them pass.
   windows:
     name: Windows / Node ${{ matrix.node }}
     runs-on: windows-latest
+    # A hung test step would otherwise hold a runner for GitHub's six hour default.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -29,56 +33,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Test
-        shell: bash
-        # pipefail matters: without it `tee` decides the exit code and a failing
-        # suite reports success.
-        run: |
-          set -o pipefail
-          npm test 2>&1 | tee test-output.txt
-      # Full logs need admin rights on the API, so a failure was only readable by
-      # someone with repo access scrolling five thousand lines in a browser. The run
-      # summary is visible to anyone, so put the actual failures there.
-      - name: Report failures
-        if: failure()
-        shell: bash
-        run: |
-          {
-            echo "## Failing tests"
-            echo '```'
-            grep -E "^not ok |^# (tests|pass|fail|skipped)" test-output.txt | head -80 || echo "(no test failures found: the suite may have crashed before reporting)"
-            echo '```'
-            echo "### First assertion detail"
-            echo '```'
-            grep -A 12 -m 3 "^not ok " test-output.txt | head -60 || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Build
-        run: npm run build
-
-  # Informational, NOT a gate. macOS and Linux have never been verified by a run,
-  # only reasoned about, and they belong to contributors rather than to the core.
-  # Reporting them without blocking turns "unverified" into real data: the results
-  # are visible on every push, and a contributor fixing a platform can see progress
-  # without a red X gating everyone else's merges in the meantime. Promote a
-  # platform into the gating job above once it is genuinely green.
-  other-platforms:
-    name: ${{ matrix.os }} (informational)
-    runs-on: ${{ matrix.os }}
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
           cache: npm
       - run: npm ci
       - name: Typecheck

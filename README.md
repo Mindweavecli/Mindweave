@@ -32,7 +32,10 @@ It is short, and it is the honest version.
 
 ## Install
 
-Requires **Node.js 20+** and a model API key.
+Requires **Windows**, **Node.js 20+**, and a model API key.
+
+macOS and Linux are coming later. They are not supported today, and the reason is
+written down under [Known problems](#known-problems) rather than glossed over.
 
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
@@ -118,8 +121,8 @@ unfiltered walk, so lookups could surface symbols from files that `read_file` an
 refuse to open, and that exclusion now applies when indexing. Language server installs
 could hang forever and leave processes running behind them, which is what made fresh
 projects stall for minutes at a time; every step now has a deadline. There is also CI at
-last, and the crash that used to block it turned out to be an out-of-memory fault rather
-than a scheduling problem.
+last, running on Windows, and the crash that used to block it turned out to be an
+out-of-memory fault rather than a scheduling problem.
 
 **v1.9.2** cut how much the agent says and how often it re-reads. It was writing a
 paragraph before every tool call, so a turn with twenty lookups printed twenty
@@ -157,11 +160,14 @@ Recent releases are exactly that. See the [changelog](CHANGELOG.md).
 Written down rather than quietly carried. Several are good places to start if you want to
 contribute, and each links to what it would actually take.
 
-**macOS and Linux are unverified.** Development happens on Windows. Both are believed to
-work and neither has been confirmed by anyone running it in anger. CI now runs the suite
-on both and reports the result without blocking, so there is finally a signal to work
-from, but a green run is not the same as somebody using it. This is still the single most
-useful thing an outside contributor can close.
+**Windows only for now. macOS and Linux are coming later.** Mindweave is developed and
+tested on Windows, and that is the platform it currently supports. The test suite does
+not yet pass on macOS or Linux: it hangs partway through rather than failing outright,
+which points at process handling that has only ever been exercised on Windows. CI runs
+Windows alone until that is fixed, so a green run means something.
+
+Making a platform work is the single most useful thing an outside contributor can take
+on, and it is genuinely open. See CONTRIBUTING.md.
 
 **The out-of-memory crash is contained, not cured.** Loading the OCaml grammar can
 exhaust V8 when the machine is already under memory pressure. Test runs are given heap
@@ -199,7 +205,6 @@ more than a description.
 
 Especially worth reporting:
 
-- **Anything on macOS or Linux.**
 - **Anything MCP**, particularly a server that serves resources or prompts.
 - **A tool the agent was offered but could not call**, or one it insisted did not exist.
 - **A prompt or menu that says something untrue.** Those cannot crash and do not fail

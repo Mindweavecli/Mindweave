@@ -93,10 +93,14 @@ of what turns up only appears when the thing is genuinely run.
 These are real, currently unowned, and roughly ordered by how much they would help. Say so
 in Discussions before starting so work does not collide.
 
-* **Verify macOS and Linux.** Development happens on Windows. Both are believed to work
-  and neither has been confirmed by anyone running it on real work. This is the single
-  most useful thing an outside contributor can close, and it needs a user more than it
-  needs a developer.
+* **Make macOS or Linux work.** Windows is the supported platform today. The suite was
+  run on both in CI and it HANGS rather than failing: the test step passed fifteen
+  minutes with no end, against three minutes for the same suite on Windows. So this is
+  not a matter of confirming it works, there is a real defect to find, and the hang
+  points at process handling that has only ever been exercised on Windows (process
+  groups, signals, and how a spawned child is killed). Those CI jobs were removed until
+  someone owns this, and they should come back in the same change that fixes it. Either
+  platform is worth taking on its own.
 * **Reduce what the OCaml grammar costs.** Loading it can exhaust V8 when the machine is
   already under memory pressure, which showed up for a long time as an unexplained
   intermittent test failure. Runs now get heap headroom and the grammar-heavy files run
